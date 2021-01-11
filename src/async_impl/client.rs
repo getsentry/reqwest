@@ -104,6 +104,8 @@ struct Config {
     #[cfg(feature = "cookies")]
     cookie_store: Option<cookie::CookieStore>,
     trust_dns: bool,
+    #[cfg(feature = "trust-dns")]
+    ip_filter: fn(std::net::IpAddr) -> bool,
     error: Option<crate::Error>,
     https_only: bool,
 }
@@ -156,6 +158,8 @@ impl ClientBuilder {
                 local_address: None,
                 nodelay: true,
                 trust_dns: cfg!(feature = "trust-dns"),
+                #[cfg(feature = "trust-dns")]
+                ip_filter: |_| true,
                 #[cfg(feature = "cookies")]
                 cookie_store: None,
                 https_only: false,
@@ -191,7 +195,7 @@ impl ClientBuilder {
             let http = match config.trust_dns {
                 false => HttpConnector::new_gai(),
                 #[cfg(feature = "trust-dns")]
-                true => HttpConnector::new_trust_dns()?,
+                true => HttpConnector::new_trust_dns(config.ip_filter)?,
                 #[cfg(not(feature = "trust-dns"))]
                 true => unreachable!("trust-dns shouldn't be enabled unless the feature is"),
             };
@@ -348,6 +352,7 @@ impl ClientBuilder {
                 proxies,
                 proxies_maybe_http_auth,
                 https_only: config.https_only,
+                ip_filter: config.ip_filter,
             }),
         })
     }
@@ -883,6 +888,17 @@ impl ClientBuilder {
         }
     }
 
+    /// Adds a filter for valid IP addresses during DNS lookup.
+    ///
+    /// # Optional
+    ///
+    /// This requires the optional `trust-dns` feature to be enabled.
+    #[cfg(feature = "trust-dns")]
+    pub fn ip_filter(mut self, filter: fn(std::net::IpAddr) -> bool) -> ClientBuilder {
+        self.config.ip_filter = filter;
+        self
+    }
+
     /// Restrict the Client to be used with HTTPS only requests.
     /// 
     /// Defaults to false.
@@ -984,7 +1000,20 @@ impl Client {
     ///
     /// This method fails whenever supplied `Url` cannot be parsed.
     pub fn request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
-        let req = url.into_url().map(move |url| Request::new(method, url));
+        let req = url.into_url().and_then(move |url| {
+            let is_valid_ip = match url.host() {
+                Some(url::Host::Ipv4(ip)) => (self.inner.ip_filter)(IpAddr::V4(ip)),
+                Some(url::Host::Ipv6(ip)) => (self.inner.ip_filter)(IpAddr::V6(ip)),
+                _ => true,
+            };
+
+            if !is_valid_ip {
+                let e = trust_dns_resolver::error::ResolveError::from("destination is restricted");
+                return Err(crate::Error::new(crate::error::Kind::Request, Some(e)));
+            }
+
+            Ok(Request::new(method, url))
+        });
         RequestBuilder::new(self.clone(), req)
     }
 
@@ -1218,6 +1247,7 @@ struct ClientRef {
     proxies: Arc<Vec<Proxy>>,
     proxies_maybe_http_auth: bool,
     https_only: bool,
+    ip_filter: fn(IpAddr) -> bool,
 }
 
 impl ClientRef {

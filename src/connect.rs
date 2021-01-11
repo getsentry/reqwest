@@ -41,8 +41,8 @@ impl HttpConnector {
     }
 
     #[cfg(feature = "trust-dns")]
-    pub(crate) fn new_trust_dns() -> crate::Result<HttpConnector> {
-        TrustDnsResolver::new()
+    pub(crate) fn new_trust_dns(filter: fn(std::net::IpAddr) -> bool) -> crate::Result<HttpConnector> {
+        TrustDnsResolver::new(filter)
             .map(hyper::client::HttpConnector::new_with_resolver)
             .map(Self::TrustDns)
             .map_err(crate::error::builder)

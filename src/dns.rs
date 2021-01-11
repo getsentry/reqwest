@@ -25,10 +25,12 @@ lazy_static! {
 #[derive(Clone)]
 pub(crate) struct TrustDnsResolver {
     state: Arc<Mutex<State>>,
+    filter: fn(std::net::IpAddr) -> bool,
 }
 
 pub(crate) struct SocketAddrs {
     iter: LookupIpIntoIter,
+    filter: fn(std::net::IpAddr) -> bool,
 }
 
 enum State {
@@ -37,7 +39,7 @@ enum State {
 }
 
 impl TrustDnsResolver {
-    pub(crate) fn new() -> io::Result<Self> {
+    pub(crate) fn new(filter: fn(std::net::IpAddr) -> bool) -> io::Result<Self> {
         SYSTEM_CONF.as_ref().map_err(|e| {
             io::Error::new(e.kind(), format!("error reading DNS system conf: {}", e))
         })?;
@@ -47,6 +49,7 @@ impl TrustDnsResolver {
         // resolver.
         Ok(TrustDnsResolver {
             state: Arc::new(Mutex::new(State::Init)),
+            filter,
         })
     }
 }
@@ -63,6 +66,7 @@ impl Service<hyper_dns::Name> for TrustDnsResolver {
     fn call(&mut self, name: hyper_dns::Name) -> Self::Future {
         let resolver = self.clone();
         Box::pin(async move {
+            let filter = resolver.filter;
             let mut lock = resolver.state.lock().await;
 
             let resolver = match &*lock {
@@ -79,7 +83,12 @@ impl Service<hyper_dns::Name> for TrustDnsResolver {
             drop(lock);
 
             let lookup = resolver.lookup_ip(name.as_str()).await?;
-            Ok(SocketAddrs { iter: lookup.into_iter() })
+            if !lookup.iter().any(filter) {
+                let e = trust_dns_resolver::error::ResolveError::from("destination is restricted");
+                return Err(e.into());
+            }
+
+            Ok(SocketAddrs { iter: lookup.into_iter(), filter })
         })
     }
 }
@@ -88,7 +97,12 @@ impl Iterator for SocketAddrs {
     type Item = SocketAddr;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().map(|ip_addr| SocketAddr::new(ip_addr, 0))
+        loop {
+            let ip_addr = self.iter.next()?;
+            if (self.filter)(ip_addr) {
+                return Some(SocketAddr::new(ip_addr, 0));
+            }
+        }
     }
 }
 
