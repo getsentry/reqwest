@@ -1,7 +1,8 @@
 #![deny(missing_docs)]
 #![deny(missing_debug_implementations)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(test, deny(warnings))]
-#![doc(html_root_url = "https://docs.rs/reqwest/0.11.0")]
+#![doc(html_root_url = "https://docs.rs/reqwest/0.11.12")]
 
 //! # reqwest
 //!
@@ -52,7 +53,7 @@
 //! There are several ways you can set the body of a request. The basic one is
 //! by using the `body()` method of a [`RequestBuilder`][builder]. This lets you set the
 //! exact raw bytes of what the body should be. It accepts various types,
-//! including `String`, `Vec<u8>`, and `File`. If you wish to pass a custom
+//! including `String` and `Vec<u8>`. If you wish to pass a custom
 //! type, you can use the `reqwest::Body` constructors.
 //!
 //! ```rust
@@ -169,6 +170,7 @@
 //!   over HTTPS.
 //! - **native-tls**: Enables TLS functionality provided by `native-tls`.
 //! - **native-tls-vendored**: Enables the `vendored` feature of `native-tls`.
+//! - **native-tls-alpn**: Enables the `alpn` feature of `native-tls`.
 //! - **rustls-tls**: Enables TLS functionality provided by `rustls`.
 //!   Equivalent to `rustls-tls-webpki-roots`.
 //! - **rustls-tls-manual-roots**: Enables TLS functionality provided by `rustls`,
@@ -181,6 +183,7 @@
 //! - **cookies**: Provides cookie session support.
 //! - **gzip**: Provides response body gzip decompression.
 //! - **brotli**: Provides response body brotli decompression.
+//! - **deflate**: Provides response body deflate decompression.
 //! - **json**: Provides serialization and deserialization for JSON bodies.
 //! - **multipart**: Provides functionality for multipart forms.
 //! - **stream**: Adds support for `futures::Stream`.
@@ -223,9 +226,11 @@ pub use url::Url;
 #[macro_use]
 mod error;
 mod into_url;
+mod response;
 
 pub use self::error::{Error, Result};
 pub use self::into_url::IntoUrl;
+pub use self::response::ResponseBuilderExt;
 
 /// Shortcut method to quickly make a `GET` request.
 ///
@@ -284,18 +289,16 @@ if_hyper! {
     #[macro_use]
     extern crate doc_comment;
 
-    #[macro_use]
-    extern crate lazy_static;
-
     #[cfg(test)]
     doctest!("../README.md");
 
     pub use self::async_impl::{
-        Body, Client, ClientBuilder, Request, RequestBuilder, Response, ResponseBuilderExt,
+        Body, Client, ClientBuilder, Request, RequestBuilder, Response, Upgraded,
     };
     pub use self::proxy::Proxy;
     #[cfg(feature = "__tls")]
-    pub use self::tls::{Certificate, Identity};
+    // Re-exports, to be removed in a future release
+    pub use tls::{Certificate, Identity};
     #[cfg(feature = "multipart")]
     pub use self::async_impl::multipart;
 
@@ -311,7 +314,7 @@ if_hyper! {
     mod proxy;
     pub mod redirect;
     #[cfg(feature = "__tls")]
-    mod tls;
+    pub mod tls;
     mod util;
 }
 

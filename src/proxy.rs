@@ -3,13 +3,14 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::{IntoUrl, Url};
+use crate::into_url::{IntoUrl, IntoUrlSealed};
+use crate::Url;
 use http::{header::HeaderValue, Uri};
 use ipnet::IpNet;
+use once_cell::sync::Lazy;
 use percent_encoding::percent_decode;
 use std::collections::HashMap;
 use std::env;
-#[cfg(target_os = "windows")]
 use std::error::Error;
 use std::net::IpAddr;
 #[cfg(target_os = "windows")]
@@ -100,6 +101,16 @@ pub enum ProxyScheme {
     },
 }
 
+impl ProxyScheme {
+    fn maybe_http_auth(&self) -> Option<&HeaderValue> {
+        match self {
+            ProxyScheme::Http { auth, .. } | ProxyScheme::Https { auth, .. } => auth.as_ref(),
+            #[cfg(feature = "socks")]
+            _ => None,
+        }
+    }
+}
+
 /// Trait used for converting into a proxy scheme. This trait supports
 /// parsing from a URL-like type, whilst also supporting proxy schemes
 /// built directly using the factory methods.
@@ -107,9 +118,53 @@ pub trait IntoProxyScheme {
     fn into_proxy_scheme(self) -> crate::Result<ProxyScheme>;
 }
 
-impl<T: IntoUrl> IntoProxyScheme for T {
+impl<S: IntoUrl> IntoProxyScheme for S {
     fn into_proxy_scheme(self) -> crate::Result<ProxyScheme> {
-        ProxyScheme::parse(self.into_url()?)
+        // validate the URL
+        let url = match self.as_str().into_url() {
+            Ok(ok) => ok,
+            Err(e) => {
+                let mut presumed_to_have_scheme = true;
+                let mut source = e.source();
+                while let Some(err) = source {
+                    if let Some(parse_error) = err.downcast_ref::<url::ParseError>() {
+                        match parse_error {
+                            url::ParseError::RelativeUrlWithoutBase => {
+                                presumed_to_have_scheme = false;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    } else if let Some(_) = err.downcast_ref::<crate::error::BadScheme>() {
+                        presumed_to_have_scheme = false;
+                        break;
+                    }
+                    source = err.source();
+                }
+                if !presumed_to_have_scheme {
+                    // the issue could have been caused by a missing scheme, so we try adding http://
+                    let try_this = format!("http://{}", self.as_str());
+                    try_this.into_url().map_err(|_| {
+                        // return the original error
+                        crate::error::builder(e)
+                    })?
+                } else {
+                    return Err(crate::error::builder(e));
+                }
+            }
+        };
+        ProxyScheme::parse(url)
+    }
+}
+
+// These bounds are accidentally leaked by the blanket impl of IntoProxyScheme
+// for all types that implement IntoUrl. So, this function exists to detect
+// if we were to break those bounds for a user.
+fn _implied_bounds() {
+    fn prox<T: IntoProxyScheme>(_t: T) {}
+
+    fn url<T: IntoUrl>(t: T) {
+        prox(t);
     }
 }
 
@@ -180,7 +235,7 @@ impl Proxy {
         )))
     }
 
-    /// Provide a custom function to determine what traffix to proxy to where.
+    /// Provide a custom function to determine what traffic to proxy to where.
     ///
     /// # Example
     ///
@@ -200,6 +255,7 @@ impl Proxy {
     /// # Ok(())
     /// # }
     /// # fn main() {}
+    /// ```
     pub fn custom<F, U: IntoProxyScheme>(fun: F) -> Proxy
     where
         F: Fn(&Url) -> Option<U> + Send + Sync + 'static,
@@ -248,45 +304,27 @@ impl Proxy {
     }
 
     pub(crate) fn maybe_has_http_auth(&self) -> bool {
-        match self.intercept {
-            Intercept::All(ProxyScheme::Http { auth: Some(..), .. })
-            | Intercept::Http(ProxyScheme::Http { auth: Some(..), .. })
+        match &self.intercept {
+            Intercept::All(p) | Intercept::Http(p) => p.maybe_http_auth().is_some(),
             // Custom *may* match 'http', so assume so.
-            | Intercept::Custom(_) => true,
-            Intercept::System(ref system) => {
-                if let Some(proxy) = system.get("http") {
-                    match proxy {
-                        ProxyScheme::Http { auth, .. } => auth.is_some(),
-                        _ => false,
-                    }
-                } else {
-                    false
-                }
-            }
+            Intercept::Custom(_) => true,
+            Intercept::System(system) => system
+                .get("http")
+                .and_then(|s| s.maybe_http_auth())
+                .is_some(),
             _ => false,
         }
     }
 
     pub(crate) fn http_basic_auth<D: Dst>(&self, uri: &D) -> Option<HeaderValue> {
-        match self.intercept {
-            Intercept::All(ProxyScheme::Http { ref auth, .. })
-            | Intercept::Http(ProxyScheme::Http { ref auth, .. }) => auth.clone(),
-            Intercept::System(ref system) => {
-                if let Some(proxy) = system.get("http") {
-                    match proxy {
-                        ProxyScheme::Http { auth, .. } => auth.clone(),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
+        match &self.intercept {
+            Intercept::All(p) | Intercept::Http(p) => p.maybe_http_auth().cloned(),
+            Intercept::System(system) => system
+                .get("http")
+                .and_then(|s| s.maybe_http_auth().cloned()),
+            Intercept::Custom(custom) => {
+                custom.call(uri).and_then(|s| s.maybe_http_auth().cloned())
             }
-            Intercept::Custom(ref custom) => custom.call(uri).and_then(|scheme| match scheme {
-                ProxyScheme::Http { auth, .. } => auth,
-                ProxyScheme::Https { auth, .. } => auth,
-                #[cfg(feature = "socks")]
-                _ => None,
-            }),
             _ => None,
         }
     }
@@ -344,8 +382,26 @@ impl fmt::Debug for Proxy {
 }
 
 impl NoProxy {
-    /// Returns a new no proxy configration if the NO_PROXY/no_proxy environment variable is set.
-    /// Returns None otherwise
+    /// Returns a new no-proxy configuration based on environment variables (or `None` if no variables are set)
+    ///
+    /// The rules are as follows:
+    /// * The environment variable `NO_PROXY` is checked, if it is not set, `no_proxy` is checked
+    /// * If neither environment variable is set, `None` is returned
+    /// * Entries are expected to be comma-separated (whitespace between entries is ignored)
+    /// * IP addresses (both IPv4 and IPv6) are allowed, as are optional subnet masks (by adding /size,
+    /// for example "`192.168.1.0/24`").
+    /// * An entry "`*`" matches all hostnames (this is the only wildcard allowed)
+    /// * Any other entry is considered a domain name (and may contain a leading dot, for example `google.com`
+    /// and `.google.com` are equivalent) and would match both that domain AND all subdomains.
+    ///
+    /// For example, if `"NO_PROXY=google.com, 192.168.1.0/24"` was set, all of the following would match
+    /// (and therefore would bypass the proxy):
+    /// * `http://google.com/`
+    /// * `http://www.google.com/`
+    /// * `http://192.168.1.42/`
+    ///
+    /// The URL `http://notgoogle.com/` would not match.
+    ///
     fn new() -> Option<Self> {
         let raw = env::var("NO_PROXY")
             .or_else(|_| env::var("no_proxy"))
@@ -355,7 +411,7 @@ impl NoProxy {
         }
         let mut ips = Vec::new();
         let mut domains = Vec::new();
-        let parts = raw.split(',');
+        let parts = raw.split(',').map(str::trim);
         for part in parts {
             match part.parse::<IpNet>() {
                 // If we can parse an IP net or address, then use it, otherwise, assume it is a domain
@@ -410,13 +466,25 @@ impl IpMatcher {
 }
 
 impl DomainMatcher {
+    // The following links may be useful to understand the origin of these rules:
+    // * https://curl.se/libcurl/c/CURLOPT_NOPROXY.html
+    // * https://github.com/curl/curl/issues/1208
     fn contains(&self, domain: &str) -> bool {
+        let domain_len = domain.len();
         for d in self.0.iter() {
-            // First check for a "wildcard" domain match. A single "." will match anything.
-            // Otherwise, check that the domains are equal
-            if (d.starts_with('.') && domain.ends_with(d.get(1..).unwrap_or_default()))
-                || d == domain
-            {
+            if d == domain || (d.starts_with('.') && &d[1..] == domain) {
+                return true;
+            } else if domain.ends_with(d) {
+                if d.starts_with('.') {
+                    // If the first character of d is a dot, that means the first character of domain
+                    // must also be a dot, so we are looking at a subdomain of d and that matches
+                    return true;
+                } else if domain.as_bytes()[domain_len - d.len() - 1] == b'.' {
+                    // Given that d is a prefix of domain, if the prior character in domain is a dot
+                    // then that means we must be matching a subdomain of d, and that matches
+                    return true;
+                }
+            } else if d == "*" {
                 return true;
             }
         }
@@ -689,9 +757,8 @@ impl Dst for Uri {
     }
 }
 
-lazy_static! {
-    static ref SYS_PROXIES: Arc<SystemProxyMap> = Arc::new(get_sys_proxies(get_from_registry()));
-}
+static SYS_PROXIES: Lazy<Arc<SystemProxyMap>> =
+    Lazy::new(|| Arc::new(get_sys_proxies(get_from_registry())));
 
 /// Get system proxies information.
 ///
@@ -723,7 +790,10 @@ fn get_sys_proxies(
 }
 
 fn insert_proxy(proxies: &mut SystemProxyMap, scheme: impl Into<String>, addr: String) -> bool {
-    if let Ok(valid_addr) = addr.into_proxy_scheme() {
+    if addr.trim().is_empty() {
+        // do not accept empty or whitespace proxy address
+        false
+    } else if let Ok(valid_addr) = addr.into_proxy_scheme() {
         proxies.insert(scheme.into(), valid_addr);
         true
     } else {
@@ -842,8 +912,7 @@ fn extract_type_prefix(address: &str) -> Option<&str> {
     if let Some(indice) = address.find("://") {
         if indice == 0 {
             None
-        }
-        else {
+        } else {
             let prefix = &address[..indice];
             let contains_banned = prefix.contains(|c| c == ':' || c == '/');
 
@@ -853,8 +922,7 @@ fn extract_type_prefix(address: &str) -> Option<&str> {
                 None
             }
         }
-    }
-    else {
+    } else {
         None
     }
 }
@@ -867,7 +935,7 @@ fn parse_registry_values(registry_values: RegistryProxyValues) -> SystemProxyMap
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lazy_static::lazy_static;
+    use once_cell::sync::Lazy;
     use std::sync::Mutex;
 
     impl Dst for Url {
@@ -977,12 +1045,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_proxy_scheme_ip_address_default_http() {
+        let ps = "192.168.1.1:8888".into_proxy_scheme().unwrap();
+
+        match ps {
+            ProxyScheme::Http { auth, host } => {
+                assert!(auth.is_none());
+                assert_eq!(host, "192.168.1.1:8888");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_proxy_scheme_parse_default_http_with_auth() {
+        // this should fail because `foo` is interpreted as the scheme and no host can be found
+        let ps = "foo:bar@localhost:1239".into_proxy_scheme().unwrap();
+
+        match ps {
+            ProxyScheme::Http { auth, host } => {
+                assert_eq!(auth.unwrap(), encode_basic_auth("foo", "bar"));
+                assert_eq!(host, "localhost:1239");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
     // Smallest possible content for a mutex
     struct MutexInner;
 
-    lazy_static! {
-        static ref ENVLOCK: Mutex<MutexInner> = Mutex::new(MutexInner);
-    }
+    static ENVLOCK: Lazy<Mutex<MutexInner>> = Lazy::new(|| Mutex::new(MutexInner));
 
     #[test]
     fn test_get_sys_proxies_parsing() {
@@ -996,10 +1089,10 @@ mod tests {
         // to avoid assert! -> panic! -> Mutex Poisoned.
         let baseline_proxies = get_sys_proxies(None);
         // the system proxy setting url is invalid.
-        env::set_var("http_proxy", "123465");
+        env::set_var("http_proxy", "file://123465");
         let invalid_proxies = get_sys_proxies(None);
         // set valid proxy
-        env::set_var("http_proxy", "http://127.0.0.1/");
+        env::set_var("http_proxy", "127.0.0.1/");
         let valid_proxies = get_sys_proxies(None);
 
         // reset user setting when guards drop
@@ -1008,8 +1101,8 @@ mod tests {
         // Let other threads run now
         drop(_lock);
 
-        assert_eq!(baseline_proxies.contains_key("http"), false);
-        assert_eq!(invalid_proxies.contains_key("http"), false);
+        assert!(!baseline_proxies.contains_key("http"));
+        assert!(!invalid_proxies.contains_key("http"));
 
         let p = &valid_proxies["http"];
         assert_eq!(p.scheme(), "http");
@@ -1032,10 +1125,17 @@ mod tests {
         let disabled_proxies = get_sys_proxies(Some((0, String::from("http://127.0.0.1/"))));
         // set valid proxy
         let valid_proxies = get_sys_proxies(Some((1, String::from("http://127.0.0.1/"))));
-        let valid_proxies_no_schema = get_sys_proxies(Some((1, String::from("127.0.0.1"))));
-        let valid_proxies_explicit_https = get_sys_proxies(Some((1, String::from("https://127.0.0.1/"))));
-        let multiple_proxies = get_sys_proxies(Some((1, String::from("http=127.0.0.1:8888;https=127.0.0.2:8888"))));
-        let multiple_proxies_explicit_schema = get_sys_proxies(Some((1, String::from("http=http://127.0.0.1:8888;https=https://127.0.0.2:8888"))));
+        let valid_proxies_no_scheme = get_sys_proxies(Some((1, String::from("127.0.0.1"))));
+        let valid_proxies_explicit_https =
+            get_sys_proxies(Some((1, String::from("https://127.0.0.1/"))));
+        let multiple_proxies = get_sys_proxies(Some((
+            1,
+            String::from("http=127.0.0.1:8888;https=127.0.0.2:8888"),
+        )));
+        let multiple_proxies_explicit_scheme = get_sys_proxies(Some((
+            1,
+            String::from("http=http://127.0.0.1:8888;https=https://127.0.0.2:8888"),
+        )));
 
         // reset user setting when guards drop
         drop(_g1);
@@ -1050,11 +1150,11 @@ mod tests {
         assert_eq!(p.scheme(), "http");
         assert_eq!(p.host(), "127.0.0.1");
 
-        let p = &valid_proxies_no_schema["http"];
+        let p = &valid_proxies_no_scheme["http"];
         assert_eq!(p.scheme(), "http");
         assert_eq!(p.host(), "127.0.0.1");
 
-        let p = &valid_proxies_no_schema["https"];
+        let p = &valid_proxies_no_scheme["https"];
         assert_eq!(p.scheme(), "http");
         assert_eq!(p.host(), "127.0.0.1");
 
@@ -1070,11 +1170,11 @@ mod tests {
         assert_eq!(p.scheme(), "http");
         assert_eq!(p.host(), "127.0.0.2:8888");
 
-        let p = &multiple_proxies_explicit_schema["http"];
+        let p = &multiple_proxies_explicit_scheme["http"];
         assert_eq!(p.scheme(), "http");
         assert_eq!(p.host(), "127.0.0.1:8888");
 
-        let p = &multiple_proxies_explicit_schema["https"];
+        let p = &multiple_proxies_explicit_scheme["https"];
         assert_eq!(p.scheme(), "https");
         assert_eq!(p.host(), "127.0.0.2:8888");
     }
@@ -1122,26 +1222,99 @@ mod tests {
 
         env::set_var(
             "NO_PROXY",
-            ".foo.bar,bar.baz,10.42.1.1/24,::1,10.124.7.8,2001::/17",
+            ".foo.bar, bar.baz,10.42.1.1/24,::1,10.124.7.8,2001::/17",
         );
 
         // Manually construct this so we aren't use the cache
         let mut p = Proxy::new(Intercept::System(Arc::new(get_sys_proxies(None))));
         p.no_proxy = NoProxy::new();
 
+        // random url, not in no_proxy
         assert_eq!(intercepted_uri(&p, "http://hyper.rs"), target);
-        assert_eq!(intercepted_uri(&p, "http://foo.bar.baz"), target);
+        // make sure that random non-subdomain string prefixes don't match
+        assert_eq!(intercepted_uri(&p, "http://notfoo.bar"), target);
+        // make sure that random non-subdomain string prefixes don't match
+        assert_eq!(intercepted_uri(&p, "http://notbar.baz"), target);
+        // ipv4 address out of range
         assert_eq!(intercepted_uri(&p, "http://10.43.1.1"), target);
+        // ipv4 address out of range
         assert_eq!(intercepted_uri(&p, "http://10.124.7.7"), target);
+        // ipv6 address out of range
         assert_eq!(intercepted_uri(&p, "http://[ffff:db8:a0b:12f0::1]"), target);
+        // ipv6 address out of range
         assert_eq!(intercepted_uri(&p, "http://[2005:db8:a0b:12f0::1]"), target);
 
+        // make sure subdomains (with leading .) match
         assert!(p.intercept(&url("http://hello.foo.bar")).is_none());
+        // make sure exact matches (without leading .) match (also makes sure spaces between entries work)
         assert!(p.intercept(&url("http://bar.baz")).is_none());
+        // check case sensitivity
+        assert!(p.intercept(&url("http://BAR.baz")).is_none());
+        // make sure subdomains (without leading . in no_proxy) match
+        assert!(p.intercept(&url("http://foo.bar.baz")).is_none());
+        // make sure subdomains (without leading . in no_proxy) match - this differs from cURL
+        assert!(p.intercept(&url("http://foo.bar")).is_none());
+        // ipv4 address match within range
         assert!(p.intercept(&url("http://10.42.1.100")).is_none());
+        // ipv6 address exact match
         assert!(p.intercept(&url("http://[::1]")).is_none());
+        // ipv6 address match within range
         assert!(p.intercept(&url("http://[2001:db8:a0b:12f0::1]")).is_none());
+        // ipv4 address exact match
         assert!(p.intercept(&url("http://10.124.7.8")).is_none());
+
+        // reset user setting when guards drop
+        drop(_g1);
+        drop(_g2);
+        // Let other threads run now
+        drop(_lock);
+    }
+
+    #[test]
+    fn test_wildcard_sys_no_proxy() {
+        // Stop other threads from modifying process-global ENV while we are.
+        let _lock = ENVLOCK.lock();
+        // save system setting first.
+        let _g1 = env_guard("HTTP_PROXY");
+        let _g2 = env_guard("NO_PROXY");
+
+        let target = "http://example.domain/";
+        env::set_var("HTTP_PROXY", target);
+
+        env::set_var("NO_PROXY", "*");
+
+        // Manually construct this so we aren't use the cache
+        let mut p = Proxy::new(Intercept::System(Arc::new(get_sys_proxies(None))));
+        p.no_proxy = NoProxy::new();
+
+        assert!(p.intercept(&url("http://foo.bar")).is_none());
+
+        // reset user setting when guards drop
+        drop(_g1);
+        drop(_g2);
+        // Let other threads run now
+        drop(_lock);
+    }
+
+    #[test]
+    fn test_empty_sys_no_proxy() {
+        // Stop other threads from modifying process-global ENV while we are.
+        let _lock = ENVLOCK.lock();
+        // save system setting first.
+        let _g1 = env_guard("HTTP_PROXY");
+        let _g2 = env_guard("NO_PROXY");
+
+        let target = "http://example.domain/";
+        env::set_var("HTTP_PROXY", target);
+
+        env::set_var("NO_PROXY", ",");
+
+        // Manually construct this so we aren't use the cache
+        let mut p = Proxy::new(Intercept::System(Arc::new(get_sys_proxies(None))));
+        p.no_proxy = NoProxy::new();
+
+        // everything should go through proxy, "effectively" nothing is in no_proxy
+        assert_eq!(intercepted_uri(&p, "http://hyper.rs"), target);
 
         // reset user setting when guards drop
         drop(_g1);
@@ -1244,7 +1417,7 @@ mod tests {
             }),
             no_proxy: None,
         };
-        assert_eq!(http_proxy_with_auth.maybe_has_http_auth(), true);
+        assert!(http_proxy_with_auth.maybe_has_http_auth());
         assert_eq!(
             http_proxy_with_auth.http_basic_auth(&Uri::from_static("http://example.com")),
             Some(HeaderValue::from_static("auth1"))
@@ -1257,7 +1430,7 @@ mod tests {
             }),
             no_proxy: None,
         };
-        assert_eq!(http_proxy_without_auth.maybe_has_http_auth(), false);
+        assert!(!http_proxy_without_auth.maybe_has_http_auth());
         assert_eq!(
             http_proxy_without_auth.http_basic_auth(&Uri::from_static("http://example.com")),
             None
@@ -1270,10 +1443,10 @@ mod tests {
             }),
             no_proxy: None,
         };
-        assert_eq!(https_proxy_with_auth.maybe_has_http_auth(), false);
+        assert!(https_proxy_with_auth.maybe_has_http_auth());
         assert_eq!(
             https_proxy_with_auth.http_basic_auth(&Uri::from_static("http://example.com")),
-            None
+            Some(HeaderValue::from_static("auth2"))
         );
 
         let all_http_proxy_with_auth = Proxy {
@@ -1283,7 +1456,7 @@ mod tests {
             }),
             no_proxy: None,
         };
-        assert_eq!(all_http_proxy_with_auth.maybe_has_http_auth(), true);
+        assert!(all_http_proxy_with_auth.maybe_has_http_auth());
         assert_eq!(
             all_http_proxy_with_auth.http_basic_auth(&Uri::from_static("http://example.com")),
             Some(HeaderValue::from_static("auth3"))
@@ -1296,10 +1469,10 @@ mod tests {
             }),
             no_proxy: None,
         };
-        assert_eq!(all_https_proxy_with_auth.maybe_has_http_auth(), false);
+        assert!(all_https_proxy_with_auth.maybe_has_http_auth());
         assert_eq!(
             all_https_proxy_with_auth.http_basic_auth(&Uri::from_static("http://example.com")),
-            None
+            Some(HeaderValue::from_static("auth4"))
         );
 
         let all_https_proxy_without_auth = Proxy {
@@ -1309,7 +1482,7 @@ mod tests {
             }),
             no_proxy: None,
         };
-        assert_eq!(all_https_proxy_without_auth.maybe_has_http_auth(), false);
+        assert!(!all_https_proxy_without_auth.maybe_has_http_auth());
         assert_eq!(
             all_https_proxy_without_auth.http_basic_auth(&Uri::from_static("http://example.com")),
             None
@@ -1329,7 +1502,7 @@ mod tests {
             })),
             no_proxy: None,
         };
-        assert_eq!(system_http_proxy_with_auth.maybe_has_http_auth(), true);
+        assert!(system_http_proxy_with_auth.maybe_has_http_auth());
         assert_eq!(
             system_http_proxy_with_auth.http_basic_auth(&Uri::from_static("http://example.com")),
             Some(HeaderValue::from_static("auth5"))
@@ -1349,10 +1522,230 @@ mod tests {
             })),
             no_proxy: None,
         };
-        assert_eq!(system_https_proxy_with_auth.maybe_has_http_auth(), false);
+        assert!(!system_https_proxy_with_auth.maybe_has_http_auth());
         assert_eq!(
             system_https_proxy_with_auth.http_basic_auth(&Uri::from_static("http://example.com")),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod test {
+    mod into_proxy_scheme {
+        use crate::Proxy;
+        use std::error::Error;
+        use std::mem::discriminant;
+
+        fn includes(haystack: &crate::error::Error, needle: url::ParseError) -> bool {
+            let mut source = haystack.source();
+            while let Some(error) = source {
+                if let Some(parse_error) = error.downcast_ref::<url::ParseError>() {
+                    if discriminant(parse_error) == discriminant(&needle) {
+                        return true;
+                    }
+                }
+                source = error.source();
+            }
+            false
+        }
+
+        fn check_parse_error(url: &str, needle: url::ParseError) {
+            let error = Proxy::http(url).unwrap_err();
+            if !includes(&error, needle) {
+                panic!("{:?} expected; {:?}, {} found", needle, error, error);
+            }
+        }
+
+        mod when_scheme_missing {
+            mod and_url_is_valid {
+                use crate::Proxy;
+
+                #[test]
+                fn lookback_works() {
+                    let _ = Proxy::http("127.0.0.1").unwrap();
+                }
+
+                #[test]
+                fn loopback_port_works() {
+                    let _ = Proxy::http("127.0.0.1:8080").unwrap();
+                }
+
+                #[test]
+                fn loopback_username_works() {
+                    let _ = Proxy::http("username@127.0.0.1").unwrap();
+                }
+
+                #[test]
+                fn loopback_username_password_works() {
+                    let _ = Proxy::http("username:password@127.0.0.1").unwrap();
+                }
+
+                #[test]
+                fn loopback_username_password_port_works() {
+                    let _ = Proxy::http("ldap%5Cgremlin:pass%3Bword@127.0.0.1:8080").unwrap();
+                }
+
+                #[test]
+                fn domain_works() {
+                    let _ = Proxy::http("proxy.example.com").unwrap();
+                }
+
+                #[test]
+                fn domain_port_works() {
+                    let _ = Proxy::http("proxy.example.com:8080").unwrap();
+                }
+
+                #[test]
+                fn domain_username_works() {
+                    let _ = Proxy::http("username@proxy.example.com").unwrap();
+                }
+
+                #[test]
+                fn domain_username_password_works() {
+                    let _ = Proxy::http("username:password@proxy.example.com").unwrap();
+                }
+
+                #[test]
+                fn domain_username_password_port_works() {
+                    let _ =
+                        Proxy::http("ldap%5Cgremlin:pass%3Bword@proxy.example.com:8080").unwrap();
+                }
+            }
+            mod and_url_has_bad {
+                use super::super::check_parse_error;
+
+                #[test]
+                fn host() {
+                    check_parse_error("username@", url::ParseError::RelativeUrlWithoutBase);
+                }
+
+                #[test]
+                fn idna_encoding() {
+                    check_parse_error("xn---", url::ParseError::RelativeUrlWithoutBase);
+                }
+
+                #[test]
+                fn port() {
+                    check_parse_error("127.0.0.1:808080", url::ParseError::RelativeUrlWithoutBase);
+                }
+
+                #[test]
+                fn ip_v4_address() {
+                    check_parse_error("421.627.718.469", url::ParseError::RelativeUrlWithoutBase);
+                }
+
+                #[test]
+                fn ip_v6_address() {
+                    check_parse_error(
+                        "[56FE::2159:5BBC::6594]",
+                        url::ParseError::RelativeUrlWithoutBase,
+                    );
+                }
+
+                #[test]
+                fn invalid_domain_character() {
+                    check_parse_error("abc 123", url::ParseError::RelativeUrlWithoutBase);
+                }
+            }
+        }
+
+        mod when_scheme_present {
+            mod and_url_is_valid {
+                use crate::Proxy;
+
+                #[test]
+                fn loopback_works() {
+                    let _ = Proxy::http("http://127.0.0.1").unwrap();
+                }
+
+                #[test]
+                fn loopback_port_works() {
+                    let _ = Proxy::http("https://127.0.0.1:8080").unwrap();
+                }
+
+                #[test]
+                fn loopback_username_works() {
+                    let _ = Proxy::http("http://username@127.0.0.1").unwrap();
+                }
+
+                #[test]
+                fn loopback_username_password_works() {
+                    let _ = Proxy::http("https://username:password@127.0.0.1").unwrap();
+                }
+
+                #[test]
+                fn loopback_username_password_port_works() {
+                    let _ =
+                        Proxy::http("http://ldap%5Cgremlin:pass%3Bword@127.0.0.1:8080").unwrap();
+                }
+
+                #[test]
+                fn domain_works() {
+                    let _ = Proxy::http("https://proxy.example.com").unwrap();
+                }
+
+                #[test]
+                fn domain_port_works() {
+                    let _ = Proxy::http("http://proxy.example.com:8080").unwrap();
+                }
+
+                #[test]
+                fn domain_username_works() {
+                    let _ = Proxy::http("https://username@proxy.example.com").unwrap();
+                }
+
+                #[test]
+                fn domain_username_password_works() {
+                    let _ = Proxy::http("http://username:password@proxy.example.com").unwrap();
+                }
+
+                #[test]
+                fn domain_username_password_port_works() {
+                    let _ =
+                        Proxy::http("https://ldap%5Cgremlin:pass%3Bword@proxy.example.com:8080")
+                            .unwrap();
+                }
+            }
+            mod and_url_has_bad {
+                use super::super::check_parse_error;
+
+                #[test]
+                fn host() {
+                    check_parse_error("http://username@", url::ParseError::EmptyHost);
+                }
+
+                #[test]
+                fn idna_encoding() {
+                    check_parse_error("http://xn---", url::ParseError::IdnaError);
+                }
+
+                #[test]
+                fn port() {
+                    check_parse_error("http://127.0.0.1:808080", url::ParseError::InvalidPort);
+                }
+
+                #[test]
+                fn ip_v4_address() {
+                    check_parse_error(
+                        "http://421.627.718.469",
+                        url::ParseError::InvalidIpv4Address,
+                    );
+                }
+
+                #[test]
+                fn ip_v6_address() {
+                    check_parse_error(
+                        "http://[56FE::2159:5BBC::6594]",
+                        url::ParseError::InvalidIpv6Address,
+                    );
+                }
+
+                #[test]
+                fn invalid_domain_character() {
+                    check_parse_error("http://abc 123/", url::ParseError::InvalidDomainCharacter);
+                }
+            }
+        }
     }
 }

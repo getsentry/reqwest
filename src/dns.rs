@@ -1,26 +1,26 @@
 use std::future::Future;
+use std::io;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{self, Poll};
-use std::io;
-use std::net::SocketAddr;
 
 use hyper::client::connect::dns as hyper_dns;
 use hyper::service::Service;
+use once_cell::sync::Lazy;
 use tokio::sync::Mutex;
 use trust_dns_resolver::{
     config::{ResolverConfig, ResolverOpts},
     lookup_ip::LookupIpIntoIter,
-    system_conf, AsyncResolver, TokioConnection, TokioConnectionProvider, TokioHandle
+    system_conf, AsyncResolver, TokioConnection, TokioConnectionProvider, TokioHandle,
 };
 
 use crate::error::BoxError;
 
 type SharedResolver = Arc<AsyncResolver<TokioConnection, TokioConnectionProvider>>;
 
-lazy_static! {
-    static ref SYSTEM_CONF: io::Result<(ResolverConfig, ResolverOpts)> = system_conf::read_system_conf().map_err(io::Error::from);
-}
+static SYSTEM_CONF: Lazy<io::Result<(ResolverConfig, ResolverOpts)>> =
+    Lazy::new(|| system_conf::read_system_conf().map_err(io::Error::from));
 
 #[derive(Clone)]
 pub(crate) struct TrustDnsResolver {
@@ -74,7 +74,7 @@ impl Service<hyper_dns::Name> for TrustDnsResolver {
                     let resolver = new_resolver().await?;
                     *lock = State::Ready(resolver.clone());
                     resolver
-                },
+                }
                 State::Ready(resolver) => resolver.clone(),
             };
 
@@ -88,7 +88,10 @@ impl Service<hyper_dns::Name> for TrustDnsResolver {
                 return Err(e.into());
             }
 
-            Ok(SocketAddrs { iter: lookup.into_iter(), filter })
+            Ok(SocketAddrs {
+                iter: lookup.into_iter(),
+                filter,
+            })
         })
     }
 }

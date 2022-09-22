@@ -136,6 +136,7 @@ impl Response {
     ///
     /// This requires the optional `cookies` feature to be enabled.
     #[cfg(feature = "cookies")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "cookies")))]
     pub fn cookies<'a>(&'a self) -> impl Iterator<Item = cookie::Cookie<'a>> + 'a {
         cookie::extract_response_cookies(self.headers()).filter_map(Result::ok)
     }
@@ -175,6 +176,16 @@ impl Response {
     /// ```
     pub fn remote_addr(&self) -> Option<SocketAddr> {
         self.inner.remote_addr()
+    }
+
+    /// Returns a reference to the associated extensions.
+    pub fn extensions(&self) -> &http::Extensions {
+        self.inner.extensions()
+    }
+
+    /// Returns a mutable reference to the associated extensions.
+    pub fn extensions_mut(&mut self) -> &mut http::Extensions {
+        self.inner.extensions_mut()
     }
 
     /// Get the content-length of the response, if it is known.
@@ -225,6 +236,7 @@ impl Response {
     ///
     /// [`serde_json::from_reader`]: https://docs.serde.rs/serde_json/fn.from_reader.html
     #[cfg(feature = "json")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "json")))]
     pub fn json<T: DeserializeOwned>(self) -> crate::Result<T> {
         wait::timeout(self.inner.json(), self.timeout).map_err(|e| match e {
             wait::Waited::TimedOut(e) => crate::error::decode(e),

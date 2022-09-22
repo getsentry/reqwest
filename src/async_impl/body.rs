@@ -7,7 +7,11 @@ use bytes::Bytes;
 use futures_core::Stream;
 use http_body::Body as HttpBody;
 use pin_project_lite::pin_project;
+#[cfg(feature = "stream")]
+use tokio::fs::File;
 use tokio::time::Sleep;
+#[cfg(feature = "stream")]
+use tokio_util::io::ReaderStream;
 
 /// An asynchronous request body.
 pub struct Body {
@@ -75,6 +79,7 @@ impl Body {
     ///
     /// This requires the `stream` feature to be enabled.
     #[cfg(feature = "stream")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "stream")))]
     pub fn wrap_stream<S>(stream: S) -> Body
     where
         S: futures_core::stream::TryStream + Send + Sync + 'static,
@@ -161,6 +166,18 @@ impl Body {
     }
 }
 
+impl From<hyper::Body> for Body {
+    #[inline]
+    fn from(body: hyper::Body) -> Body {
+        Self {
+            inner: Inner::Streaming {
+                body: Box::pin(WrapHyper(body)),
+                timeout: None,
+            },
+        }
+    }
+}
+
 impl From<Bytes> for Body {
     #[inline]
     fn from(bytes: Bytes) -> Body {
@@ -193,6 +210,15 @@ impl From<&'static str> for Body {
     #[inline]
     fn from(s: &'static str) -> Body {
         s.as_bytes().into()
+    }
+}
+
+#[cfg(feature = "stream")]
+#[cfg_attr(docsrs, doc(cfg(feature = "stream")))]
+impl From<File> for Body {
+    #[inline]
+    fn from(file: File) -> Body {
+        Body::wrap_stream(ReaderStream::new(file))
     }
 }
 

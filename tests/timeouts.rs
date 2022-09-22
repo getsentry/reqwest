@@ -73,10 +73,10 @@ async fn connect_timeout() {
         .build()
         .unwrap();
 
-    let url = format!("http://10.255.255.1:81/slow");
+    let url = "http://10.255.255.1:81/slow";
 
     let res = client
-        .get(&url)
+        .get(url)
         .timeout(Duration::from_millis(1000))
         .send()
         .await;
@@ -172,6 +172,43 @@ fn timeout_blocking_request() {
 
     assert!(err.is_timeout());
     assert_eq!(err.url().map(|u| u.as_str()), Some(url.as_str()));
+}
+
+#[cfg(feature = "blocking")]
+#[test]
+fn blocking_request_timeout_body() {
+    let _ = env_logger::try_init();
+
+    let client = reqwest::blocking::Client::builder()
+        // this should be overridden
+        .connect_timeout(Duration::from_millis(200))
+        // this should be overridden
+        .timeout(Duration::from_millis(200))
+        .build()
+        .unwrap();
+
+    let server = server::http(move |_req| {
+        async {
+            // immediate response, but delayed body
+            let body = hyper::Body::wrap_stream(futures_util::stream::once(async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                Ok::<_, std::convert::Infallible>("Hello")
+            }));
+
+            http::Response::new(body)
+        }
+    });
+
+    let url = format!("http://{}/closes", server.addr());
+    let res = client
+        .get(&url)
+        // longer than client timeout
+        .timeout(Duration::from_secs(5))
+        .send()
+        .expect("get response");
+
+    let text = res.text().unwrap();
+    assert_eq!(text, "Hello");
 }
 
 #[cfg(feature = "blocking")]

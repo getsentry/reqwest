@@ -1,12 +1,15 @@
 use std::convert::TryFrom;
 use std::fmt;
+use std::io::Write;
 
+use base64::write::EncoderWriter as Base64Encoder;
+use bytes::Bytes;
 use http::{request::Parts, Method, Request as HttpRequest};
-use url::Url;
+use serde::Serialize;
 #[cfg(feature = "json")]
 use serde_json;
-use serde::Serialize;
-use serde_urlencoded;
+use url::Url;
+use web_sys::RequestCredentials;
 
 use super::{Body, Client, Response};
 use crate::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
@@ -18,6 +21,7 @@ pub struct Request {
     headers: HeaderMap,
     body: Option<Body>,
     pub(super) cors: bool,
+    pub(super) credentials: Option<RequestCredentials>,
 }
 
 /// A builder to construct the properties of a `Request`.
@@ -27,13 +31,16 @@ pub struct RequestBuilder {
 }
 
 impl Request {
-    pub(super) fn new(method: Method, url: Url) -> Self {
+    /// Constructs a new request.
+    #[inline]
+    pub fn new(method: Method, url: Url) -> Self {
         Request {
             method,
             url,
             headers: HeaderMap::new(),
             body: None,
             cors: true,
+            credentials: None,
         }
     }
 
@@ -84,6 +91,25 @@ impl Request {
     pub fn body_mut(&mut self) -> &mut Option<Body> {
         &mut self.body
     }
+
+    /// Attempts to clone the `Request`.
+    ///
+    /// None is returned if a body is which can not be cloned.
+    pub fn try_clone(&self) -> Option<Request> {
+        let body = match self.body.as_ref() {
+            Some(body) => Some(body.try_clone()?),
+            None => None,
+        };
+
+        Some(Self {
+            method: self.method.clone(),
+            url: self.url.clone(),
+            headers: self.headers.clone(),
+            body,
+            cors: self.cors,
+            credentials: self.credentials,
+        })
+    }
 }
 
 impl RequestBuilder {
@@ -132,6 +158,15 @@ impl RequestBuilder {
     }
 
     /// Send a form body.
+    ///
+    /// Sets the body to the url encoded serialization of the passed value,
+    /// and also sets the `Content-Type: application/x-www-form-urlencoded`
+    /// header.
+    ///
+    /// # Errors
+    ///
+    /// This method fails if the passed value cannot be serialized into
+    /// url encoded format
     pub fn form<T: Serialize + ?Sized>(mut self, form: &T) -> RequestBuilder {
         let mut error = None;
         if let Ok(ref mut req) = self.request {
@@ -153,6 +188,7 @@ impl RequestBuilder {
     }
 
     #[cfg(feature = "json")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "json")))]
     /// Set the request json
     pub fn json<T: Serialize + ?Sized>(mut self, json: &T) -> RequestBuilder {
         let mut error = None;
@@ -172,6 +208,25 @@ impl RequestBuilder {
         self
     }
 
+    /// Enable HTTP basic authentication.
+    pub fn basic_auth<U, P>(self, username: U, password: Option<P>) -> RequestBuilder
+    where
+        U: fmt::Display,
+        P: fmt::Display,
+    {
+        let mut header_value = b"Basic ".to_vec();
+        {
+            let mut encoder = Base64Encoder::new(&mut header_value, base64::STANDARD);
+            // The unwraps here are fine because Vec::write* is infallible.
+            write!(encoder, "{}:", username).unwrap();
+            if let Some(password) = password {
+                write!(encoder, "{}", password).unwrap();
+            }
+        }
+
+        self.header(crate::header::AUTHORIZATION, header_value)
+    }
+
     /// Enable HTTP bearer authentication.
     pub fn bearer_auth<T>(self, token: T) -> RequestBuilder
     where
@@ -180,7 +235,6 @@ impl RequestBuilder {
         let header_value = format!("Bearer {}", token);
         self.header(crate::header::AUTHORIZATION, header_value)
     }
-
 
     /// Set the request body.
     pub fn body<T: Into<Body>>(mut self, body: T) -> RequestBuilder {
@@ -192,6 +246,7 @@ impl RequestBuilder {
 
     /// TODO
     #[cfg(feature = "multipart")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "multipart")))]
     pub fn multipart(mut self, multipart: super::multipart::Form) -> RequestBuilder {
         if let Ok(ref mut req) = self.request {
             *req.body_mut() = Some(Body::from_form(multipart))
@@ -251,6 +306,54 @@ impl RequestBuilder {
         self
     }
 
+    /// Set fetch credentials to 'same-origin'
+    ///
+    /// # WASM
+    ///
+    /// This option is only effective with WebAssembly target.
+    ///
+    /// The [request credentials][mdn] will be set to 'same-origin'.
+    ///
+    /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/API/Request/credentials
+    pub fn fetch_credentials_same_origin(mut self) -> RequestBuilder {
+        if let Ok(ref mut req) = self.request {
+            req.credentials = Some(RequestCredentials::SameOrigin);
+        }
+        self
+    }
+
+    /// Set fetch credentials to 'include'
+    ///
+    /// # WASM
+    ///
+    /// This option is only effective with WebAssembly target.
+    ///
+    /// The [request credentials][mdn] will be set to 'include'.
+    ///
+    /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/API/Request/credentials
+    pub fn fetch_credentials_include(mut self) -> RequestBuilder {
+        if let Ok(ref mut req) = self.request {
+            req.credentials = Some(RequestCredentials::Include);
+        }
+        self
+    }
+
+    /// Set fetch credentials to 'omit'
+    ///
+    /// # WASM
+    ///
+    /// This option is only effective with WebAssembly target.
+    ///
+    /// The [request credentials][mdn] will be set to 'omit'.
+    ///
+    /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/API/Request/credentials
+    pub fn fetch_credentials_omit(mut self) -> RequestBuilder {
+        if let Ok(ref mut req) = self.request {
+            req.credentials = Some(RequestCredentials::Omit);
+        }
+        self
+    }
+
     /// Build a `Request`, which can be inspected, modified and executed with
     /// `Client::execute()`.
     pub fn build(self) -> crate::Result<Request> {
@@ -280,6 +383,35 @@ impl RequestBuilder {
     pub async fn send(self) -> crate::Result<Response> {
         let req = self.request?;
         self.client.execute_request(req).await
+    }
+
+    /// Attempt to clone the RequestBuilder.
+    ///
+    /// `None` is returned if the RequestBuilder can not be cloned.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use reqwest::Error;
+    /// #
+    /// # fn run() -> Result<(), Error> {
+    /// let client = reqwest::Client::new();
+    /// let builder = client.post("http://httpbin.org/post")
+    ///     .body("from a &str!");
+    /// let clone = builder.try_clone();
+    /// assert!(clone.is_some());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn try_clone(&self) -> Option<RequestBuilder> {
+        self.request
+            .as_ref()
+            .ok()
+            .and_then(|req| req.try_clone())
+            .map(|req| RequestBuilder {
+                client: self.client.clone(),
+                request: Ok(req),
+            })
     }
 }
 
@@ -329,6 +461,30 @@ where
             headers,
             body: Some(body.into()),
             cors: true,
+            credentials: None,
         })
+    }
+}
+
+impl TryFrom<Request> for HttpRequest<Body> {
+    type Error = crate::Error;
+
+    fn try_from(req: Request) -> crate::Result<Self> {
+        let Request {
+            method,
+            url,
+            headers,
+            body,
+            ..
+        } = req;
+
+        let mut req = HttpRequest::builder()
+            .method(method)
+            .uri(url.as_str())
+            .body(body.unwrap_or_else(|| Body::from(Bytes::default())))
+            .map_err(crate::error::builder)?;
+
+        *req.headers_mut() = headers;
+        Ok(req)
     }
 }
