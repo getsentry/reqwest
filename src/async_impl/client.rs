@@ -1753,20 +1753,7 @@ impl Client {
     ///
     /// This method fails whenever the supplied `Url` cannot be parsed.
     pub fn request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
-        let req = url.into_url().and_then(move |url| {
-            let is_valid_ip = match url.host() {
-                Some(url::Host::Ipv4(ip)) => (self.inner.ip_filter)(IpAddr::V4(ip)),
-                Some(url::Host::Ipv6(ip)) => (self.inner.ip_filter)(IpAddr::V6(ip)),
-                _ => true,
-            };
-
-            if !is_valid_ip {
-                let e = trust_dns_resolver::error::ResolveError::from("destination is restricted");
-                return Err(crate::Error::new(crate::error::Kind::Request, Some(e)));
-            }
-
-            Ok(Request::new(method, url))
-        });
+        let req = url.into_url().map(move |url| Request::new(method, url));
         RequestBuilder::new(self.clone(), req)
     }
 
@@ -1826,6 +1813,11 @@ impl Client {
             }
         }
 
+        if let Err(err) = validate_url(self.inner.ip_filter, &url) {
+            return Pending {
+                inner: PendingInner::Error(Some(err)),
+            };
+        }
         let uri = expect_uri(&url);
 
         let (reusable, body) = match body {
@@ -2195,6 +2187,8 @@ impl PendingRequest {
         }
         self.retry_count += 1;
 
+        // XXX: We can't return an `Err` here, as we are mutating the `in_flight` future to restart it.
+        // However, at this point, we already validated `self.url` so it should be good.
         let uri = expect_uri(&self.url);
 
         *self.as_mut().in_flight().get_mut() = match *self.as_mut().in_flight().as_ref() {
@@ -2409,6 +2403,11 @@ impl Future for PendingRequest {
                                 std::mem::replace(self.as_mut().headers(), HeaderMap::new());
 
                             remove_sensitive_headers(&mut headers, &self.url, &self.urls);
+
+                            if let Err(err) = validate_url(self.client.ip_filter, &self.url) {
+                                return Poll::Ready(Err(err));
+                            }
+
                             let uri = expect_uri(&self.url);
                             let body = match self.body {
                                 Some(Some(ref body)) => Body::reusable(body.clone()),
@@ -2504,6 +2503,20 @@ fn add_cookie_header(headers: &mut HeaderMap, cookie_store: &dyn cookie::CookieS
     if let Some(header) = cookie_store.cookies(url) {
         headers.insert(crate::header::COOKIE, header);
     }
+}
+
+fn validate_url(ip_filter: fn(IpAddr) -> bool, url: &Url) -> Result<(), crate::Error> {
+    let is_valid_ip = match url.host() {
+        Some(url::Host::Ipv4(ip)) => (ip_filter)(IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => (ip_filter)(IpAddr::V6(ip)),
+        _ => true,
+    };
+
+    if !is_valid_ip {
+        let e = trust_dns_resolver::error::ResolveError::from("destination is restricted");
+        return Err(crate::Error::new(crate::error::Kind::Request, Some(e)));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
