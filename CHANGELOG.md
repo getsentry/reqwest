@@ -1,3 +1,19 @@
+## v0.11.24
+
+- Add `Certificate::from_pem_bundle()` to add a bundle.
+- Add `http3_prior_knowledge()` to blocking client builder.
+- Remove `Sync` bounds requirement for `Body::wrap_stream()`.
+- Fix HTTP/2 to retry `REFUSED_STREAM` requests.
+- Fix instances of converting `Url` to `Uri` that could panic.
+
+## v0.11.23
+
+- Add `Proxy::custom_http_auth(val)` for setting the raw `Proxy-Authorization` header when connecting to proxies.
+- Fix redirect to reject locations that are not `http://` or `https://`.
+- Fix setting `nodelay` when TLS is enabled but URL is HTTP.
+- (wasm) Add `ClientBuilder::user_agent(val)`.
+- (wasm) add `multipart::Form::headers(headers)`.
+
 ## v0.11.22
 
 - Fix compilation on Windows when `trust-dns` is enabled.

@@ -37,7 +37,7 @@ use crate::cookie;
 use crate::dns::trust_dns::TrustDnsResolver;
 use crate::dns::{gai::GaiResolver, DnsResolverWithOverrides, DynResolver, Resolve};
 use crate::error;
-use crate::into_url::{expect_uri, try_uri};
+use crate::into_url::try_uri;
 use crate::redirect::{self, remove_sensitive_headers};
 #[cfg(feature = "__tls")]
 use crate::tls::{self, TlsBackend};
@@ -498,9 +498,7 @@ impl ClientBuilder {
                                 Err(err) => {
                                     invalid_count += 1;
                                     log::warn!(
-                                        "rustls failed to parse DER certificate {:?} {:?}",
-                                        &err,
-                                        &cert
+                                        "rustls failed to parse DER certificate {err:?} {cert:?}"
                                     );
                                 }
                             }
@@ -791,7 +789,11 @@ impl ClientBuilder {
     /// Cookies received in responses will be preserved and included in
     /// additional requests.
     ///
-    /// By default, no cookie store is used.
+    /// By default, no cookie store is used. Enabling the cookie store
+    /// with `cookie_store(true)` will set the store to a default implementation.
+    /// It is **not** necessary to call [cookie_store(true)](crate::ClientBuilder::cookie_store) if [cookie_provider(my_cookie_store)](crate::ClientBuilder::cookie_provider)
+    /// is used; calling [cookie_store(true)](crate::ClientBuilder::cookie_store) _after_ [cookie_provider(my_cookie_store)](crate::ClientBuilder::cookie_provider) will result
+    /// in the provided `my_cookie_store` being **overridden** with a default implementation.
     ///
     /// # Optional
     ///
@@ -812,7 +814,10 @@ impl ClientBuilder {
     /// Cookies received in responses will be passed to this store, and
     /// additional requests will query this store for cookies.
     ///
-    /// By default, no cookie store is used.
+    /// By default, no cookie store is used. It is **not** necessary to also call
+    /// [cookie_store(true)](crate::ClientBuilder::cookie_store) if [cookie_provider(my_cookie_store)](crate::ClientBuilder::cookie_provider) is used; calling
+    /// [cookie_store(true)](crate::ClientBuilder::cookie_store) _after_ [cookie_provider(my_cookie_store)](crate::ClientBuilder::cookie_provider) will result
+    /// in the provided `my_cookie_store` being **overridden** with a default implementation.
     ///
     /// # Optional
     ///
@@ -1109,6 +1114,7 @@ impl ClientBuilder {
 
     /// Only use HTTP/3.
     #[cfg(feature = "http3")]
+    #[cfg_attr(docsrs, doc(cfg(all(reqwest_unstable, feature = "http3",))))]
     pub fn http3_prior_knowledge(mut self) -> ClientBuilder {
         self.config.http_version_pref = HttpVersionPref::Http3;
         self
@@ -1517,6 +1523,14 @@ impl ClientBuilder {
         self
     }
 
+    /// Restrict the Client to be used with HTTPS only requests.
+    ///
+    /// Defaults to false.
+    pub fn https_only(mut self, enabled: bool) -> ClientBuilder {
+        self.config.https_only = enabled;
+        self
+    }
+
     /// Enables the [trust-dns](trust_dns_resolver) async resolver instead of a default threadpool using `getaddrinfo`.
     ///
     /// If the `trust-dns` feature is turned on, the default option is enabled.
@@ -1556,14 +1570,6 @@ impl ClientBuilder {
     #[cfg(feature = "trust-dns")]
     pub fn ip_filter(mut self, filter: fn(std::net::IpAddr) -> bool) -> ClientBuilder {
         self.config.ip_filter = filter;
-        self
-    }
-
-    /// Restrict the Client to be used with HTTPS only requests.
-    ///
-    /// Defaults to false.
-    pub fn https_only(mut self, enabled: bool) -> ClientBuilder {
-        self.config.https_only = enabled;
         self
     }
 
@@ -1609,6 +1615,7 @@ impl ClientBuilder {
     ///
     /// The default is false.
     #[cfg(feature = "http3")]
+    #[cfg_attr(docsrs, doc(cfg(all(reqwest_unstable, feature = "http3",))))]
     pub fn set_tls_enable_early_data(mut self, enabled: bool) -> ClientBuilder {
         self.config.tls_enable_early_data = enabled;
         self
@@ -1620,6 +1627,7 @@ impl ClientBuilder {
     ///
     /// [`TransportConfig`]: https://docs.rs/quinn/latest/quinn/struct.TransportConfig.html
     #[cfg(feature = "http3")]
+    #[cfg_attr(docsrs, doc(cfg(all(reqwest_unstable, feature = "http3",))))]
     pub fn set_quic_max_idle_timeout(mut self, value: Duration) -> ClientBuilder {
         self.config.quic_max_idle_timeout = Some(value);
         self
@@ -1632,6 +1640,7 @@ impl ClientBuilder {
     ///
     /// [`TransportConfig`]: https://docs.rs/quinn/latest/quinn/struct.TransportConfig.html
     #[cfg(feature = "http3")]
+    #[cfg_attr(docsrs, doc(cfg(all(reqwest_unstable, feature = "http3",))))]
     pub fn set_quic_stream_receive_window(mut self, value: VarInt) -> ClientBuilder {
         self.config.quic_stream_receive_window = Some(value);
         self
@@ -1644,6 +1653,7 @@ impl ClientBuilder {
     ///
     /// [`TransportConfig`]: https://docs.rs/quinn/latest/quinn/struct.TransportConfig.html
     #[cfg(feature = "http3")]
+    #[cfg_attr(docsrs, doc(cfg(all(reqwest_unstable, feature = "http3",))))]
     pub fn set_quic_receive_window(mut self, value: VarInt) -> ClientBuilder {
         self.config.quic_receive_window = Some(value);
         self
@@ -1655,6 +1665,7 @@ impl ClientBuilder {
     ///
     /// [`TransportConfig`]: https://docs.rs/quinn/latest/quinn/struct.TransportConfig.html
     #[cfg(feature = "http3")]
+    #[cfg_attr(docsrs, doc(cfg(all(reqwest_unstable, feature = "http3",))))]
     pub fn set_quic_send_window(mut self, value: u64) -> ClientBuilder {
         self.config.quic_send_window = Some(value);
         self
@@ -1818,7 +1829,10 @@ impl Client {
                 inner: PendingInner::Error(Some(err)),
             };
         }
-        let uri = expect_uri(&url);
+        let uri = match try_uri(&url) {
+            Ok(uri) => uri,
+            _ => return Pending::new_err(error::url_invalid_uri(url)),
+        };
 
         let (reusable, body) = match body {
             Some(body) => {
@@ -2170,7 +2184,7 @@ impl PendingRequest {
             return false;
         }
 
-        trace!("can retry {:?}", err);
+        trace!("can retry {err:?}");
 
         let body = match self.body {
             Some(Some(ref body)) => Body::reusable(body.clone()),
@@ -2187,9 +2201,8 @@ impl PendingRequest {
         }
         self.retry_count += 1;
 
-        // XXX: We can't return an `Err` here, as we are mutating the `in_flight` future to restart it.
-        // However, at this point, we already validated `self.url` so it should be good.
-        let uri = expect_uri(&self.url);
+        // If it parsed once, it should parse again
+        let uri = try_uri(&self.url).expect("URL was already validated as URI");
 
         *self.as_mut().in_flight().get_mut() = match *self.as_mut().in_flight().as_ref() {
             #[cfg(feature = "http3")]
@@ -2227,7 +2240,7 @@ fn is_retryable_error(err: &(dyn std::error::Error + 'static)) -> bool {
     #[cfg(feature = "http3")]
     if let Some(cause) = err.source() {
         if let Some(err) = cause.downcast_ref::<h3::Error>() {
-            debug!("determining if HTTP/3 error {} can be retried", err);
+            debug!("determining if HTTP/3 error {err} can be retried");
             // TODO: Does h3 provide an API for checking the error?
             return err.to_string().as_str() == "timeout";
         }
@@ -2236,9 +2249,16 @@ fn is_retryable_error(err: &(dyn std::error::Error + 'static)) -> bool {
     if let Some(cause) = err.source() {
         if let Some(err) = cause.downcast_ref::<h2::Error>() {
             // They sent us a graceful shutdown, try with a new connection!
-            return err.is_go_away()
-                && err.is_remote()
-                && err.reason() == Some(h2::Reason::NO_ERROR);
+            if err.is_go_away() && err.is_remote() && err.reason() == Some(h2::Reason::NO_ERROR) {
+                return true;
+            }
+
+            // REFUSED_STREAM was sent from the server, which is safe to retry.
+            // https://www.rfc-editor.org/rfc/rfc9113.html#section-8.7-3.2
+            if err.is_reset() && err.is_remote() && err.reason() == Some(h2::Reason::REFUSED_STREAM)
+            {
+                return true;
+            }
         }
     }
     false
@@ -2362,7 +2382,7 @@ impl Future for PendingRequest {
                     //
                     // If not, just log it and skip the redirect.
                     let loc = loc.and_then(|url| {
-                        if try_uri(&url).is_some() {
+                        if try_uri(&url).is_ok() {
                             Some(url)
                         } else {
                             None
@@ -2370,7 +2390,7 @@ impl Future for PendingRequest {
                     });
 
                     if loc.is_none() {
-                        debug!("Location header had invalid URI: {:?}", val);
+                        debug!("Location header had invalid URI: {val:?}");
                     }
                     loc
                 });
@@ -2412,7 +2432,7 @@ impl Future for PendingRequest {
                                 return Poll::Ready(Err(err));
                             }
 
-                            let uri = expect_uri(&self.url);
+                            let uri = try_uri(&self.url)?;
                             let body = match self.body {
                                 Some(Some(ref body)) => Body::reusable(body.clone()),
                                 _ => Body::empty(),
@@ -2457,7 +2477,7 @@ impl Future for PendingRequest {
                             continue;
                         }
                         redirect::ActionKind::Stop => {
-                            debug!("redirect policy disallowed redirection to '{}'", loc);
+                            debug!("redirect policy disallowed redirection to '{loc}'");
                         }
                         redirect::ActionKind::Error(err) => {
                             return Poll::Ready(Err(crate::error::redirect(err, self.url.clone())));
@@ -2526,8 +2546,21 @@ fn validate_url(ip_filter: fn(IpAddr) -> bool, url: &Url) -> Result<(), crate::E
 #[cfg(test)]
 mod tests {
     #[tokio::test]
-    async fn execute_request_rejects_invald_urls() {
+    async fn execute_request_rejects_invalid_urls() {
         let url_str = "hxxps://www.rust-lang.org/";
+        let url = url::Url::parse(url_str).unwrap();
+        let result = crate::get(url.clone()).await;
+
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err.is_builder());
+        assert_eq!(url_str, err.url().unwrap().as_str());
+    }
+
+    /// https://github.com/seanmonstar/reqwest/issues/668
+    #[tokio::test]
+    async fn execute_request_rejects_invalid_hostname() {
+        let url_str = "https://{{hostname}}/";
         let url = url::Url::parse(url_str).unwrap();
         let result = crate::get(url.clone()).await;
 

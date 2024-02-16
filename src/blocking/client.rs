@@ -478,6 +478,14 @@ impl ClientBuilder {
         self.with_inner(|inner| inner.http2_max_frame_size(sz))
     }
 
+    /// This requires the optional `http3` feature to be
+    /// enabled.
+    #[cfg(feature = "http3")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "http3")))]
+    pub fn http3_prior_knowledge(self) -> ClientBuilder {
+        self.with_inner(|inner| inner.http3_prior_knowledge())
+    }
+
     // TCP options
 
     /// Set whether sockets have `TCP_NODELAY` enabled.
@@ -1006,11 +1014,11 @@ impl Drop for InnerClientHandle {
             .map(|h| h.thread().id())
             .expect("thread not dropped yet");
 
-        trace!("closing runtime thread ({:?})", id);
+        trace!("closing runtime thread ({id:?})");
         self.tx.take();
-        trace!("signaled close for runtime thread ({:?})", id);
+        trace!("signaled close for runtime thread ({id:?})");
         self.thread.take().map(|h| h.join());
-        trace!("closed runtime thread ({:?})", id);
+        trace!("closed runtime thread ({id:?})");
     }
 }
 
@@ -1031,7 +1039,7 @@ impl ClientHandle {
                 {
                     Err(e) => {
                         if let Err(e) = spawn_tx.send(Err(e)) {
-                            error!("Failed to communicate runtime creation failure: {:?}", e);
+                            error!("Failed to communicate runtime creation failure: {e:?}");
                         }
                         return;
                     }
@@ -1042,14 +1050,14 @@ impl ClientHandle {
                     let client = match builder.build() {
                         Err(e) => {
                             if let Err(e) = spawn_tx.send(Err(e)) {
-                                error!("Failed to communicate client creation failure: {:?}", e);
+                                error!("Failed to communicate client creation failure: {e:?}");
                             }
                             return;
                         }
                         Ok(v) => v,
                     };
                     if let Err(e) = spawn_tx.send(Ok(())) {
-                        error!("Failed to communicate successful startup: {:?}", e);
+                        error!("Failed to communicate successful startup: {e:?}");
                         return;
                     }
 

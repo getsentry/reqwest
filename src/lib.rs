@@ -2,7 +2,6 @@
 #![deny(missing_debug_implementations)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(test, deny(warnings))]
-#![doc(html_root_url = "https://docs.rs/reqwest/0.11.22")]
 
 //! # reqwest
 //!
@@ -16,7 +15,7 @@
 //! - Plain bodies, [JSON](#json), [urlencoded](#forms), [multipart]
 //! - Customizable [redirect policy](#redirect-policies)
 //! - HTTP [Proxies](#proxies)
-//! - Uses system-native [TLS](#tls)
+//! - Uses [TLS](#tls) by default
 //! - Cookies
 //!
 //! The [`reqwest::Client`][client] is asynchronous. For applications wishing
@@ -39,7 +38,7 @@
 //!     .text()
 //!     .await?;
 //!
-//! println!("body = {:?}", body);
+//! println!("body = {body:?}");
 //! # Ok(())
 //! # }
 //! ```
@@ -150,16 +149,17 @@
 //!
 //! ## TLS
 //!
-//! By default, a `Client` will make use of system-native transport layer
-//! security to connect to HTTPS destinations. This means schannel on Windows,
-//! Security-Framework on macOS, and OpenSSL on Linux.
+//! A `Client` will use transport layer security (TLS) by default to connect to
+//! HTTPS destinations.
 //!
-//! - Additional X509 certificates can be configured on a `ClientBuilder` with the
-//!   [`Certificate`] type.
+//! - Additional server certificates can be configured on a `ClientBuilder`
+//!   with the [`Certificate`] type.
 //! - Client certificates can be added to a `ClientBuilder` with the
 //!   [`Identity`] type.
 //! - Various parts of TLS can also be configured or even disabled on the
 //!   `ClientBuilder`.
+//!
+//! See more details in the [`tls`] module.
 //!
 //! ## WASM
 //!
@@ -313,6 +313,9 @@ fn _assert_impls() {
 
     assert_send::<Error>();
     assert_sync::<Error>();
+
+    assert_send::<Body>();
+    assert_sync::<Body>();
 }
 
 if_hyper! {
