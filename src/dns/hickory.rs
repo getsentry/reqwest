@@ -1,18 +1,17 @@
-//! DNS resolution via the [trust_dns_resolver](https://github.com/bluejekyll/trust-dns) crate
+//! DNS resolution via the [hickory-resolver](https://github.com/hickory-dns/hickory-dns) crate
 
-use hyper::client::connect::dns::Name;
+use hickory_resolver::{lookup_ip::LookupIpIntoIter, system_conf, TokioAsyncResolver};
 use once_cell::sync::OnceCell;
-use trust_dns_resolver::{lookup_ip::LookupIpIntoIter, system_conf, TokioAsyncResolver};
 
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use super::{Addrs, Resolve, Resolving};
+use super::{Addrs, Name, Resolve, Resolving};
 
 /// Wrapper around an `AsyncResolver`, which implements the `Resolve` trait.
 #[derive(Debug, Clone)]
-pub(crate) struct TrustDnsResolver {
+pub(crate) struct HickoryDnsResolver {
     /// Since we might not have been called in the context of a
     /// Tokio Runtime in initialization, so we must delay the actual
     /// construction of the resolver.
@@ -25,16 +24,16 @@ struct SocketAddrs {
     filter: fn(std::net::IpAddr) -> bool,
 }
 
-impl TrustDnsResolver {
+impl HickoryDnsResolver {
     pub fn new(filter: fn(std::net::IpAddr) -> bool) -> Self {
-        TrustDnsResolver {
+        Self {
             state: Default::default(),
             filter,
         }
     }
 }
 
-impl Resolve for TrustDnsResolver {
+impl Resolve for HickoryDnsResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let resolver = self.clone();
         Box::pin(async move {
@@ -43,7 +42,7 @@ impl Resolve for TrustDnsResolver {
 
             let lookup = resolver.lookup_ip(name.as_str()).await?;
             if !lookup.iter().any(filter) {
-                let e = trust_dns_resolver::error::ResolveError::from("destination is restricted");
+                let e = hickory_resolver::error::ResolveError::from("destination is restricted");
                 return Err(e.into());
             }
 

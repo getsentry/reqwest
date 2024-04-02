@@ -1,3 +1,41 @@
+## v0.12.2
+
+- Fix missing ALPN when connecting to socks5 proxy with rustls.
+- Fix TLS version limits with rustls.
+- Fix not detected ALPN h2 from server with native-tls.
+
+## v0.12.1
+
+- Fix `ClientBuilder::interface()` when no TLS is enabled.
+- Fix `TlsInfo::peer_certificate()` being truncated with rustls.
+- Fix panic if `http2` feature disabled but TLS negotiated h2 in ALPN.
+- Fix `Display` for `Error` to not include its source error.
+
+# v0.12.0
+
+- Upgrade to `hyper`, `http`, and `http-body` v1.
+- Add better support for converting to and from `http::Request` and `http::Response`.
+- Add `http2` optional cargo feature, default on.
+- Add `charset` optional cargo feature, default on.
+- Add `macos-system-configuration` cargo feature, default on.
+- Change all optional dependencies to no longer be exposed as implicit features.
+- Add `ClientBuilder::interface(str)` to specify the local interface to bind to.
+- Experimental: disables the `http3` feature temporarily.
+
+## v0.11.27
+
+- Add `hickory-dns` feature, deprecating `trust-dns`.
+- (wasm) Fix `Form::text()` to not set octet-stream for plain text fields.
+
+## v0.11.26
+
+- Revert `system-configuration` upgrade, which broke MSRV on macOS.
+
+## v0.11.25
+
+- Fix `Certificate::from_pem_bundle()` parsing.
+- Fix Apple linker errors from detecting system proxies.
+
 ## v0.11.24
 
 - Add `Certificate::from_pem_bundle()` to add a bundle.

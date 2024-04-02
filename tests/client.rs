@@ -1,12 +1,9 @@
 #![cfg(not(target_arch = "wasm32"))]
 mod support;
 
-use futures_util::stream::StreamExt;
-use support::delay_server;
 use support::server;
 
-#[cfg(feature = "json")]
-use http::header::CONTENT_TYPE;
+use http::header::{CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING};
 #[cfg(feature = "json")]
 use std::collections::HashMap;
 
@@ -54,6 +51,30 @@ async fn auto_headers() {
     assert_eq!(res.url().as_str(), &url);
     assert_eq!(res.status(), reqwest::StatusCode::OK);
     assert_eq!(res.remote_addr(), Some(server.addr()));
+}
+
+#[tokio::test]
+async fn donot_set_conent_length_0_if_have_no_body() {
+    let server = server::http(move |req| async move {
+        let headers = req.headers();
+        assert_eq!(headers.get(CONTENT_LENGTH), None);
+        assert!(headers.get(CONTENT_TYPE).is_none());
+        assert!(headers.get(TRANSFER_ENCODING).is_none());
+        dbg!(&headers);
+        http::Response::default()
+    });
+
+    let url = format!("http://{}/conent-length", server.addr());
+    let res = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("client builder")
+        .get(&url)
+        .send()
+        .await
+        .expect("request");
+
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
 }
 
 #[tokio::test]
@@ -132,19 +153,23 @@ async fn response_json() {
 
 #[tokio::test]
 async fn body_pipe_response() {
+    use http_body_util::BodyExt;
     let _ = env_logger::try_init();
 
-    let server = server::http(move |mut req| async move {
+    let server = server::http(move |req| async move {
         if req.uri() == "/get" {
             http::Response::new("pipe me".into())
         } else {
             assert_eq!(req.uri(), "/pipe");
             assert_eq!(req.headers()["transfer-encoding"], "chunked");
 
-            let mut full: Vec<u8> = Vec::new();
-            while let Some(item) = req.body_mut().next().await {
-                full.extend(&*item.unwrap());
-            }
+            let full: Vec<u8> = req
+                .into_body()
+                .collect()
+                .await
+                .expect("must succeed")
+                .to_bytes()
+                .to_vec();
 
             assert_eq!(full, b"pipe me");
 
@@ -229,9 +254,9 @@ async fn overridden_dns_resolution_with_gai_multiple() {
     assert_eq!("Hello", text);
 }
 
-#[cfg(feature = "trust-dns")]
+#[cfg(feature = "hickory-dns")]
 #[tokio::test]
-async fn overridden_dns_resolution_with_trust_dns() {
+async fn overridden_dns_resolution_with_hickory_dns() {
     let _ = env_logger::builder().is_test(true).try_init();
     let server = server::http(move |_req| async { http::Response::new("Hello".into()) });
 
@@ -242,7 +267,7 @@ async fn overridden_dns_resolution_with_trust_dns() {
     );
     let client = reqwest::Client::builder()
         .resolve(overridden_domain, server.addr())
-        .trust_dns(true)
+        .hickory_dns(true)
         .build()
         .expect("client builder");
     let req = client.get(&url);
@@ -253,9 +278,9 @@ async fn overridden_dns_resolution_with_trust_dns() {
     assert_eq!("Hello", text);
 }
 
-#[cfg(feature = "trust-dns")]
+#[cfg(feature = "hickory-dns")]
 #[tokio::test]
-async fn overridden_dns_resolution_with_trust_dns_multiple() {
+async fn overridden_dns_resolution_with_hickory_dns_multiple() {
     let _ = env_logger::builder().is_test(true).try_init();
     let server = server::http(move |_req| async { http::Response::new("Hello".into()) });
 
@@ -277,7 +302,7 @@ async fn overridden_dns_resolution_with_trust_dns_multiple() {
                 server.addr(),
             ],
         )
-        .trust_dns(true)
+        .hickory_dns(true)
         .build()
         .expect("client builder");
     let req = client.get(&url);
@@ -321,7 +346,6 @@ fn use_preconfigured_rustls_default() {
 
     let root_cert_store = rustls::RootCertStore::empty();
     let tls = rustls::ClientConfig::builder()
-        .with_safe_defaults()
         .with_root_certificates(root_cert_store)
         .with_no_client_auth();
 
@@ -440,6 +464,7 @@ async fn test_tls_info() {
 // fail, because the only thread would block until `panic_rx` receives a
 // notification while the client needs to be driven to get the graceful shutdown
 // done.
+#[cfg(feature = "http2")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn highly_concurrent_requests_to_http2_server_with_low_max_concurrent_streams() {
     let client = reqwest::Client::builder()
@@ -452,7 +477,9 @@ async fn highly_concurrent_requests_to_http2_server_with_low_max_concurrent_stre
             assert_eq!(req.version(), http::Version::HTTP_2);
             http::Response::default()
         },
-        |builder| builder.http2_only(true).http2_max_concurrent_streams(1),
+        |builder| {
+            builder.http2().max_concurrent_streams(1);
+        },
     );
 
     let url = format!("http://{}", server.addr());
@@ -468,8 +495,11 @@ async fn highly_concurrent_requests_to_http2_server_with_low_max_concurrent_stre
     futures_util::future::join_all(futs).await;
 }
 
+#[cfg(feature = "http2")]
 #[tokio::test]
 async fn highly_concurrent_requests_to_slow_http2_server_with_low_max_concurrent_streams() {
+    use support::delay_server;
+
     let client = reqwest::Client::builder()
         .http2_prior_knowledge()
         .build()
@@ -480,9 +510,8 @@ async fn highly_concurrent_requests_to_slow_http2_server_with_low_max_concurrent
             assert_eq!(req.version(), http::Version::HTTP_2);
             http::Response::default()
         },
-        |mut http| {
-            http.http2_only(true).http2_max_concurrent_streams(1);
-            http
+        |http| {
+            http.http2().max_concurrent_streams(1);
         },
         std::time::Duration::from_secs(2),
     )

@@ -143,6 +143,7 @@ async fn connect_many_timeout() {
     assert!(err.is_connect() && err.is_timeout());
 }
 
+#[cfg(feature = "stream")]
 #[tokio::test]
 async fn response_timeout() {
     let _ = env_logger::try_init();
@@ -150,7 +151,7 @@ async fn response_timeout() {
     let server = server::http(move |_req| {
         async {
             // immediate response, but delayed body
-            let body = hyper::Body::wrap_stream(futures_util::stream::once(async {
+            let body = reqwest::Body::wrap_stream(futures_util::stream::once(async {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 Ok::<_, std::convert::Infallible>("Hello")
             }));
@@ -232,6 +233,7 @@ fn timeout_blocking_request() {
 }
 
 #[cfg(feature = "blocking")]
+#[cfg(feature = "stream")]
 #[test]
 fn blocking_request_timeout_body() {
     let _ = env_logger::try_init();
@@ -247,7 +249,7 @@ fn blocking_request_timeout_body() {
     let server = server::http(move |_req| {
         async {
             // immediate response, but delayed body
-            let body = hyper::Body::wrap_stream(futures_util::stream::once(async {
+            let body = reqwest::Body::wrap_stream(futures_util::stream::once(async {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 Ok::<_, std::convert::Infallible>("Hello")
             }));
@@ -300,4 +302,24 @@ fn write_timeout_large_body() {
 
     assert!(err.is_timeout());
     assert_eq!(err.url().map(|u| u.as_str()), Some(url.as_str()));
+}
+
+#[tokio::test]
+async fn response_body_timeout_forwards_size_hint() {
+    let _ = env_logger::try_init();
+
+    let server = server::http(move |_req| async { http::Response::new(b"hello".to_vec().into()) });
+
+    let client = reqwest::Client::new();
+
+    let url = format!("http://{}/slow", server.addr());
+
+    let res = client
+        .get(&url)
+        .timeout(Duration::from_secs(1))
+        .send()
+        .await
+        .expect("response");
+
+    assert_eq!(res.content_length(), Some(5));
 }
