@@ -131,6 +131,8 @@ impl Error {
                 if hyper_err.is_connect() {
                     return true;
                 }
+            } else if err.downcast_ref::<hickory_resolver::error::ResolveError>().is_some() {
+                return true;
             }
 
             source = err.source();
