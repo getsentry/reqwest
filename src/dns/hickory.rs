@@ -40,7 +40,12 @@ impl Resolve for HickoryDnsResolver {
             let filter = resolver.filter;
             let resolver = resolver.state.get_or_try_init(new_resolver)?;
 
+            let start = std::time::Instant::now();
             let lookup = resolver.lookup_ip(name.as_str()).await?;
+            if rand::random::<f32>() < 0.01 {
+                log::info!("DNS lookup for {} took {:?}", name.as_str(), start.elapsed());
+            }
+
             if !lookup.iter().any(filter) {
                 let e = hickory_resolver::error::ResolveError::from("destination is restricted");
                 return Err(e.into());
