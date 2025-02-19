@@ -88,7 +88,7 @@ fn new_resolver() -> io::Result<TokioAsyncResolver> {
     })?;
 
     let mut mut_ops = opts.clone();
-    mut_ops.cache_size = 100_000; // 100k entries
+    mut_ops.cache_size = 500_000; // 500k entries
 
     Ok(TokioAsyncResolver::tokio(config, mut_ops))
 }
