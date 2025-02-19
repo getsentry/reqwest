@@ -86,5 +86,9 @@ fn new_resolver() -> io::Result<TokioAsyncResolver> {
             format!("error reading DNS system conf: {e}"),
         )
     })?;
-    Ok(TokioAsyncResolver::tokio(config, opts))
+
+    let mut mut_ops = opts.clone();
+    mut_ops.cache_size = 100_000; // 100k entries
+
+    Ok(TokioAsyncResolver::tokio(config, mut_ops))
 }
