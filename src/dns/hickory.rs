@@ -43,7 +43,11 @@ impl Resolve for HickoryDnsResolver {
             let start = std::time::Instant::now();
             let lookup = resolver.lookup_ip(name.as_str()).await?;
             if rand::random::<f32>() < 0.01 {
-                log::info!("DNS lookup for {} took {:?}", name.as_str(), start.elapsed());
+                log::info!(
+                    "DNS lookup for {} took {:?}",
+                    name.as_str(),
+                    start.elapsed()
+                );
             }
 
             if !lookup.iter().any(filter) {
