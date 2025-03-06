@@ -35,6 +35,8 @@ use crate::connect::Connector;
 use crate::cookie;
 #[cfg(feature = "hickory-dns")]
 use crate::dns::hickory::HickoryDnsResolver;
+use hickory_resolver;
+
 use crate::dns::{gai::GaiResolver, DnsResolverWithOverrides, DynResolver, Resolve};
 use crate::error;
 use crate::into_url::try_uri;
