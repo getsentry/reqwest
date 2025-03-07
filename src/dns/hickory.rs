@@ -41,21 +41,6 @@ impl HickoryDnsResolver {
         self.config = Some((config, opts));
         self
     }
-
-    fn new_resolver(&self) -> io::Result<TokioAsyncResolver> {
-        let (config, mut opts) = match self.config.clone() {
-            Some((config, opts)) => (config, opts),
-            None => system_conf::read_system_conf().map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("error reading DNS system conf: {e}"),
-                )
-            })?,
-        };
-
-        opts.cache_size = 500_000; // 500k entries
-        Ok(TokioAsyncResolver::tokio(config, opts))
-    }
 }
 
 impl Resolve for HickoryDnsResolver {
@@ -63,7 +48,7 @@ impl Resolve for HickoryDnsResolver {
         let resolver = self.clone();
         Box::pin(async move {
             let filter = resolver.filter;
-            let resolver = resolver.state.get_or_try_init(|| resolver.new_resolver())?;
+            let resolver = resolver.state.get_or_try_init(|| new_resolver(resolver.config))?;
 
             let start = std::time::Instant::now();
             let lookup = resolver.lookup_ip(name.as_str()).await?;
@@ -100,4 +85,19 @@ impl Iterator for SocketAddrs {
             }
         }
     }
+}
+
+fn new_resolver(resolver_config: Option<(ResolverConfig, ResolverOpts)>) -> io::Result<TokioAsyncResolver> {
+    let (config, mut opts) = match resolver_config {
+        Some((config, opts)) => (config, opts),
+        None => system_conf::read_system_conf().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("error reading DNS system conf: {e}"),
+            )
+        })?,
+    };
+
+    opts.cache_size = 500_000; // 500k entries
+    Ok(TokioAsyncResolver::tokio(config, opts))
 }
