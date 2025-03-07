@@ -55,6 +55,7 @@ use quinn::TransportConfig;
 use quinn::VarInt;
 
 type HyperResponseFuture = hyper_util::client::legacy::ResponseFuture;
+const DEFAULT_DNS_PORT: u16 = 53;
 
 /// An asynchronous `Client` to make Requests with.
 ///
@@ -155,7 +156,9 @@ struct Config {
     cookie_store: Option<Arc<dyn cookie::CookieStore>>,
     hickory_dns: bool,
     #[cfg(feature = "hickory-dns")]
-    ip_filter: fn(std::net::IpAddr) -> bool,
+    dns_nameservers: Option<Vec<IpAddr>>,
+    #[cfg(feature = "hickory-dns")]
+    ip_filter: fn(IpAddr) -> bool,
     error: Option<crate::Error>,
     https_only: bool,
     #[cfg(feature = "http3")]
@@ -269,6 +272,8 @@ impl ClientBuilder {
                 #[cfg(feature = "http3")]
                 quic_send_window: None,
                 dns_resolver: None,
+                #[cfg(feature = "hickory-dns")]
+                dns_nameservers: None,
             },
         }
     }
@@ -305,7 +310,35 @@ impl ClientBuilder {
             let mut resolver: Arc<dyn Resolve> = match config.hickory_dns {
                 false => Arc::new(GaiResolver::new()),
                 #[cfg(feature = "hickory-dns")]
-                true => Arc::new(HickoryDnsResolver::new(config.ip_filter)),
+                true => {
+                    let mut resolver = HickoryDnsResolver::new(config.ip_filter);
+                    if let Some(nameservers) = config.dns_nameservers {
+                        let mut hickory_config = hickory_resolver::config::ResolverConfig::new();
+                        for ip in nameservers {
+                            hickory_config.add_name_server(hickory_resolver::config::NameServerConfig {
+                                socket_addr: (ip, DEFAULT_DNS_PORT).into(),
+                                protocol: hickory_resolver::config::Protocol::Udp,
+                                tls_dns_name: None,
+                                trust_negative_responses: false,
+                                bind_addr: None,
+                            });
+                            hickory_config.add_name_server(hickory_resolver::config::NameServerConfig {
+                                socket_addr: (ip, DEFAULT_DNS_PORT).into(),
+                                protocol: hickory_resolver::config::Protocol::Tcp,
+                                tls_dns_name: None,
+                                trust_negative_responses: false,
+                                bind_addr: None,
+                            });
+                        }
+
+                        let mut opts = hickory_resolver::config::ResolverOpts::default();
+                        opts.use_hosts_file = false;
+
+                        resolver = resolver.with_config(hickory_config, opts);
+                    }
+
+                    Arc::new(resolver)
+                },
                 #[cfg(not(feature = "hickory-dns"))]
                 true => unreachable!("hickory-dns shouldn't be enabled unless the feature is"),
             };
@@ -1692,6 +1725,25 @@ impl ClientBuilder {
         self.config.hickory_dns = enable;
         self
     }
+
+    /// Configure custom DNS nameservers for this client when using hickory_dns
+    ///
+    /// # Example
+    /// ```
+    /// # use std::net::{IpAddr, Ipv4Addr};
+    /// let client = reqwest::Client::builder()
+    ///     .dns_nameservers(vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))])
+    ///     .build()?;
+    /// ```
+    #[cfg(feature = "hickory-dns")]
+    pub fn dns_nameservers<I>(mut self, nameservers: I) -> ClientBuilder
+    where
+        I: IntoIterator<Item = IpAddr>
+    {
+        self.config.dns_nameservers = Some(nameservers.into_iter().collect());
+        self
+    }
+
 
     /// Disables the hickory-dns async resolver.
     ///
