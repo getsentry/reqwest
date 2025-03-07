@@ -35,6 +35,8 @@ use crate::connect::Connector;
 use crate::cookie;
 #[cfg(feature = "hickory-dns")]
 use crate::dns::hickory::HickoryDnsResolver;
+use hickory_resolver;
+
 use crate::dns::{gai::GaiResolver, DnsResolverWithOverrides, DynResolver, Resolve};
 use crate::error;
 use crate::into_url::try_uri;
@@ -53,6 +55,7 @@ use quinn::TransportConfig;
 use quinn::VarInt;
 
 type HyperResponseFuture = hyper_util::client::legacy::ResponseFuture;
+const DEFAULT_DNS_PORT: u16 = 53;
 
 /// An asynchronous `Client` to make Requests with.
 ///
@@ -152,6 +155,10 @@ struct Config {
     #[cfg(feature = "cookies")]
     cookie_store: Option<Arc<dyn cookie::CookieStore>>,
     hickory_dns: bool,
+    #[cfg(feature = "hickory-dns")]
+    dns_nameservers: Option<Vec<IpAddr>>,
+    #[cfg(feature = "hickory-dns")]
+    ip_filter: fn(IpAddr) -> bool,
     error: Option<crate::Error>,
     https_only: bool,
     #[cfg(feature = "http3")]
@@ -248,6 +255,8 @@ impl ClientBuilder {
                 interface: None,
                 nodelay: true,
                 hickory_dns: cfg!(feature = "hickory-dns"),
+                #[cfg(feature = "hickory-dns")]
+                ip_filter: |_| true,
                 #[cfg(feature = "cookies")]
                 cookie_store: None,
                 https_only: false,
@@ -263,6 +272,8 @@ impl ClientBuilder {
                 #[cfg(feature = "http3")]
                 quic_send_window: None,
                 dns_resolver: None,
+                #[cfg(feature = "hickory-dns")]
+                dns_nameservers: None,
             },
         }
     }
@@ -299,7 +310,35 @@ impl ClientBuilder {
             let mut resolver: Arc<dyn Resolve> = match config.hickory_dns {
                 false => Arc::new(GaiResolver::new()),
                 #[cfg(feature = "hickory-dns")]
-                true => Arc::new(HickoryDnsResolver::default()),
+                true => {
+                    let mut resolver = HickoryDnsResolver::new(config.ip_filter);
+                    if let Some(nameservers) = config.dns_nameservers {
+                        let mut hickory_config = hickory_resolver::config::ResolverConfig::new();
+                        for ip in nameservers {
+                            hickory_config.add_name_server(hickory_resolver::config::NameServerConfig {
+                                socket_addr: (ip, DEFAULT_DNS_PORT).into(),
+                                protocol: hickory_resolver::config::Protocol::Udp,
+                                tls_dns_name: None,
+                                trust_negative_responses: false,
+                                bind_addr: None,
+                            });
+                            hickory_config.add_name_server(hickory_resolver::config::NameServerConfig {
+                                socket_addr: (ip, DEFAULT_DNS_PORT).into(),
+                                protocol: hickory_resolver::config::Protocol::Tcp,
+                                tls_dns_name: None,
+                                trust_negative_responses: false,
+                                bind_addr: None,
+                            });
+                        }
+
+                        let mut opts = hickory_resolver::config::ResolverOpts::default();
+                        opts.use_hosts_file = false;
+
+                        resolver = resolver.with_config(hickory_config, opts);
+                    }
+
+                    Arc::new(resolver)
+                },
                 #[cfg(not(feature = "hickory-dns"))]
                 true => unreachable!("hickory-dns shouldn't be enabled unless the feature is"),
             };
@@ -743,6 +782,7 @@ impl ClientBuilder {
                 proxies,
                 proxies_maybe_http_auth,
                 https_only: config.https_only,
+                ip_filter: config.ip_filter,
             }),
         })
     }
@@ -1686,6 +1726,25 @@ impl ClientBuilder {
         self
     }
 
+    /// Configure custom DNS nameservers for this client when using hickory_dns
+    ///
+    /// # Example
+    /// ```
+    /// # use std::net::{IpAddr, Ipv4Addr};
+    /// let client = reqwest::Client::builder()
+    ///     .dns_nameservers(vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))])
+    ///     .build()?;
+    /// ```
+    #[cfg(feature = "hickory-dns")]
+    pub fn dns_nameservers<I>(mut self, nameservers: I) -> ClientBuilder
+    where
+        I: IntoIterator<Item = IpAddr>
+    {
+        self.config.dns_nameservers = Some(nameservers.into_iter().collect());
+        self
+    }
+
+
     /// Disables the hickory-dns async resolver.
     ///
     /// This method exists even if the optional `hickory-dns` feature is not enabled.
@@ -1719,6 +1778,17 @@ impl ClientBuilder {
         {
             self
         }
+    }
+
+    /// Adds a filter for valid IP addresses during DNS lookup.
+    ///
+    /// # Optional
+    ///
+    /// This requires the optional `hickory-dns` feature to be enabled.
+    #[cfg(feature = "hickory-dns")]
+    pub fn ip_filter(mut self, filter: fn(std::net::IpAddr) -> bool) -> ClientBuilder {
+        self.config.ip_filter = filter;
+        self
     }
 
     /// Override DNS resolution for specific domains to a particular IP address.
@@ -1972,6 +2042,11 @@ impl Client {
             }
         }
 
+        if let Err(err) = validate_url(self.inner.ip_filter, &url) {
+            return Pending {
+                inner: PendingInner::Error(Some(err)),
+            };
+        }
         let uri = match try_uri(&url) {
             Ok(uri) => uri,
             _ => return Pending::new_err(error::url_invalid_uri(url)),
@@ -2234,6 +2309,7 @@ struct ClientRef {
     proxies: Arc<Vec<Proxy>>,
     proxies_maybe_http_auth: bool,
     https_only: bool,
+    ip_filter: fn(IpAddr) -> bool,
 }
 
 impl ClientRef {
@@ -2585,6 +2661,11 @@ impl Future for PendingRequest {
                                 std::mem::replace(self.as_mut().headers(), HeaderMap::new());
 
                             remove_sensitive_headers(&mut headers, &self.url, &self.urls);
+
+                            if let Err(err) = validate_url(self.client.ip_filter, &self.url) {
+                                return Poll::Ready(Err(err));
+                            }
+
                             let uri = try_uri(&self.url)?;
                             let body = match self.body {
                                 Some(Some(ref body)) => Body::reusable(body.clone()),
@@ -2680,6 +2761,20 @@ fn add_cookie_header(headers: &mut HeaderMap, cookie_store: &dyn cookie::CookieS
     if let Some(header) = cookie_store.cookies(url) {
         headers.insert(crate::header::COOKIE, header);
     }
+}
+
+fn validate_url(ip_filter: fn(IpAddr) -> bool, url: &Url) -> Result<(), crate::Error> {
+    let is_valid_ip = match url.host() {
+        Some(url::Host::Ipv4(ip)) => (ip_filter)(IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => (ip_filter)(IpAddr::V6(ip)),
+        _ => true,
+    };
+
+    if !is_valid_ip {
+        let e = hickory_resolver::error::ResolveError::from("destination is restricted");
+        return Err(crate::Error::new(crate::error::Kind::Request, Some(e)));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

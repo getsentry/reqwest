@@ -27,7 +27,7 @@ features = [
 ]
 
 [features]
-default = ["default-tls", "charset", "http2", "macos-system-configuration"]
+default = ["default-tls", "charset", "http2", "macos-system-configuration", "hickory-dns"]
 
 # Note: this doesn't enable the 'native-tls' feature, which adds specific
 # functionality for it.
@@ -74,7 +74,7 @@ macos-system-configuration = ["dep:system-configuration"]
 
 # Experimental HTTP/3 client.
 # Disabled while waiting for quinn to upgrade.
-#http3 = ["rustls-tls-manual-roots", "dep:h3", "dep:h3-quinn", "dep:quinn", "dep:futures-channel"]
+ http3 = ["rustls-tls-manual-roots", "dep:h3", "dep:h3-quinn", "dep:quinn", "dep:futures-channel"]
 
 # Internal (PRIVATE!) features used to aid testing.
 # Don't rely on these whatsoever. They may disappear at anytime.
@@ -100,7 +100,7 @@ tower-service = "0.3"
 futures-core = { version = "0.3.0", default-features = false }
 futures-util = { version = "0.3.0", default-features = false }
 sync_wrapper = "0.1.2"
-
+rand = "0.8"
 # Optional deps...
 
 ## json
