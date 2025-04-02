@@ -13,16 +13,27 @@ use std::sync::Arc;
 use super::{Addrs, Name, Resolve, Resolving};
 
 /// Wrapper around an `AsyncResolver`, which implements the `Resolve` trait.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct HickoryDnsResolver {
     /// Since we might not have been called in the context of a
     /// Tokio Runtime in initialization, so we must delay the actual
     /// construction of the resolver.
     state: Arc<OnceCell<TokioAsyncResolver>>,
+    filter: fn(std::net::IpAddr) -> bool,
 }
 
 struct SocketAddrs {
     iter: LookupIpIntoIter,
+    filter: fn(std::net::IpAddr) -> bool,
+}
+
+impl HickoryDnsResolver {
+    pub fn new(filter: fn(std::net::IpAddr) -> bool) -> Self {
+        Self {
+            state: Default::default(),
+            filter,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -32,11 +43,18 @@ impl Resolve for HickoryDnsResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let resolver = self.clone();
         Box::pin(async move {
+            let filter = resolver.filter;
             let resolver = resolver.state.get_or_try_init(new_resolver)?;
 
             let lookup = resolver.lookup_ip(name.as_str()).await?;
+            if !lookup.iter().any(filter) {
+                let e = hickory_resolver::error::ResolveError::from("destination is restricted");
+                return Err(e.into());
+            }
+
             let addrs: Addrs = Box::new(SocketAddrs {
                 iter: lookup.into_iter(),
+                filter,
             });
             Ok(addrs)
         })
@@ -47,7 +65,12 @@ impl Iterator for SocketAddrs {
     type Item = SocketAddr;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().map(|ip_addr| SocketAddr::new(ip_addr, 0))
+        loop {
+            let ip_addr = self.iter.next()?;
+            if (self.filter)(ip_addr) {
+                return Some(SocketAddr::new(ip_addr, 0));
+            }
+        }
     }
 }
 
