@@ -21,22 +21,21 @@ fn test_response_text() {
 }
 
 #[test]
-fn donot_set_conent_length_0_if_have_no_body() {
+fn donot_set_content_length_0_if_have_no_body() {
     let server = server::http(move |req| async move {
         let headers = req.headers();
         assert_eq!(headers.get(CONTENT_LENGTH), None);
         assert!(headers.get(CONTENT_TYPE).is_none());
         assert!(headers.get(TRANSFER_ENCODING).is_none());
-        dbg!(&headers);
         http::Response::default()
     });
 
-    let url = format!("http://{}/conent-length", server.addr());
+    let url = format!("http://{}/content-length", server.addr());
     let res = reqwest::blocking::Client::builder()
         .no_proxy()
         .build()
         .expect("client builder")
-        .post(&url)
+        .get(&url)
         .send()
         .expect("request");
 
@@ -160,7 +159,7 @@ fn test_post_form() {
 }
 
 /// Calling `Response::error_for_status`` on a response with status in 4xx
-/// returns a error.
+/// returns an error.
 #[test]
 fn test_error_for_status_4xx() {
     let server = server::http(move |_req| async {
@@ -179,7 +178,7 @@ fn test_error_for_status_4xx() {
 }
 
 /// Calling `Response::error_for_status`` on a response with status in 5xx
-/// returns a error.
+/// returns an error.
 #[test]
 fn test_error_for_status_5xx() {
     let server = server::http(move |_req| async {

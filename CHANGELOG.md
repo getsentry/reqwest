@@ -1,3 +1,94 @@
+## v0.12.15
+
+- Fix Windows to support both `ProxyOverride` and `NO_PROXY`.
+- Fix http3 to support streaming response bodies.
+- Fix http3 dependency from public API misuse.
+
+## v0.12.14
+
+- Fix missing `fetch_mode_no_cors()`, marking as deprecated when not on WASM.
+
+## v0.12.13
+
+- Add `Form::into_reader()` for blocking `multipart` forms.
+- Add `Form::into_stream()` for async `multipart` forms.
+- Add support for SOCKS4a proxies.
+- Fix decoding responses with multiple zstd frames.
+- Fix `RequestBuilder::form()` from overwriting a previously set `Content-Type` header, like the other builder methods.
+- Fix cloning of request timeout in `blocking::Request`.
+- Fix http3 synchronization of connection creation, reducing unneccesary extra connections.
+- Fix Windows system proxy to use `ProxyOverride` as a `NO_PROXY` value.
+- Fix blocking read to correctly reserve and zero read buffer.
+- (wasm) Add support for request timeouts.
+- (wasm) Fix `Error::is_timeout()` to return true when from a request timeout.
+
+## v0.12.12
+
+- (wasm) Fix compilation by not compiler `tokio/time` on WASM.
+
+## v0.12.11
+
+- Fix decompression returning an error when HTTP/2 ends with an empty data frame.
+
+## v0.12.10
+
+- Add `ClientBuilder::connector_layer()` to allow customizing the connector stack.
+- Add `ClientBuilder::http2_max_header_list_size()` option.
+- Fix propagating body size hint (`content-length`) information when wrapping bodies.
+- Fix decompression of chunked bodies so the connections can be reused more often.
+
+## v0.12.9
+
+- Add `tls::CertificateRevocationLists` support.
+- Add crate features to enable webpki roots without selecting a rustls provider.
+- Fix `connection_verbose()` to output read logs.
+- Fix `multipart::Part::file()` to automatically include content-length.
+- Fix proxy to internally no longer cache system proxy settings.
+
+## v0.12.8
+
+- Add support for SOCKS4 proxies.
+- Add `multipart::Form::file()` method for adding files easily.
+- Add `Body::wrap()` to wrap any `http_body::Body` type.
+- Fix the pool configuration to use a timer to remove expired connections.
+
+
+## v0.12.7
+
+- Revert adding `impl Service<http::Request<_>>` for `Client`.
+
+## v0.12.6
+
+- Add support for `danger_accept_invalid_hostnames` for `rustls`.
+- Add `impl Service<http::Request<Body>>` for `Client` and `&'_ Client`.
+- Add support for `!Sync` bodies in `Body::wrap_stream()`.
+- Enable happy eyeballs when `hickory-dns` is used.
+- Fix `Proxy` so that `HTTP(S)_PROXY` values take precedence over `ALL_PROXY`.
+- Fix `blocking::RequestBuilder::header()` from unsetting `sensitive` on passed header values.
+
+## v0.12.5
+
+- Add `blocking::ClientBuilder::dns_resolver()` method to change DNS resolver in blocking client.
+- Add `http3` feature back, still requiring `reqwest_unstable`.
+- Add `rustls-tls-no-provider` Cargo feature to use rustls without a crypto provider.
+- Fix `Accept-Encoding` header combinations.
+- Fix http3 resolving IPv6 addresses.
+- Internal: upgrade to rustls 0.23.
+
+## v0.12.4
+
+- Add `zstd` support, enabled with `zstd` Cargo feature.
+- Add `ClientBuilder::read_timeout(Duration)`, which applies the duration for each read operation. The timeout resets after a successful read.
+
+## v0.12.3
+
+- Add `FromStr` for `dns::Name`.
+- Add `ClientBuilder::built_in_webpki_certs(bool)` to enable them separately.
+- Add `ClientBuilder::built_in_native_certs(bool)` to enable them separately.
+- Fix sending `content-length: 0` for GET requests.
+- Fix response body `content_length()` to return value when timeout is configured.
+- Fix `ClientBuilder::resolve()` to use lowercase domain names.
+
 ## v0.12.2
 
 - Fix missing ALPN when connecting to socks5 proxy with rustls.
@@ -338,7 +429,7 @@
 
 ## v0.9.17
 
-- Fix `Cookie` headers so as to not include attributes from the `Set-Cookie` (like `HttpOnly`, `Secure`, etc).
+- Fix `Cookie` headers to not include attributes from the `Set-Cookie` (like `HttpOnly`, `Secure`, etc.)
 
 ## v0.9.16
 
@@ -357,8 +448,8 @@
 
 - Add optional support for SOCKS5 proxies, by enabling the `socks5` cargo feature.
 - Add Cookie Store support to `Client`, automatically handling cookies for a session.
-* Add `ClientBuilder::cookie_store(enable: bool)` method to enable a cookie store that persists across requests.
-* Add `Response::cookies()` accessor that allows iterating over response cookies.
+- Add `ClientBuilder::cookie_store(enable: bool)` method to enable a cookie store that persists across requests.
+- Add `Response::cookies()` accessor that allows iterating over response cookies.
 - Fix `Proxy` to check the URL for a username and password.
 
 ## v0.9.13
@@ -484,7 +575,7 @@
 
 - Fix large request bodies failing because of improper handling of backpressure.
 - Remove body-related headers when redirect changes a `POST` into a `GET`.
-- Reduce memory size of `Response` and `Error` signicantly.
+- Reduce memory size of `Response` and `Error` significantly.
 
 # v0.9.0
 
@@ -693,7 +784,7 @@
 
 - Proxy support (#30)
 - Self-signed TLS certificates (#97)
-- Disabling TLS hostname validation   (#89)
+- Disabling TLS hostname validation (#89)
 - A `Request` type that can be used instead of the `RequestBuilder` (#85)
 - Add `Response::error_for_status()` to easily convert 400 and 500 status responses into an `Error`  (#98)
 - Upgrade hyper to 0.11
@@ -706,7 +797,7 @@
 ### Fixes
 
 - Publicly exports `RedirectAction` and `RedirectAttempt`
-- `Error::get_ref` returns `Error + Send + Sync`  
+- `Error::get_ref` returns `Error + Send + Sync`
 
 ### Breaking Changes
 

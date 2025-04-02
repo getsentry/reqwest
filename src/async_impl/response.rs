@@ -1,6 +1,7 @@
 use std::fmt;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::BodyExt;
@@ -34,15 +35,16 @@ pub struct Response {
 
 impl Response {
     pub(super) fn new(
-        res: hyper::Response<hyper::body::Incoming>,
+        res: hyper::Response<ResponseBody>,
         url: Url,
         accepts: Accepts,
-        timeout: Option<Pin<Box<Sleep>>>,
+        total_timeout: Option<Pin<Box<Sleep>>>,
+        read_timeout: Option<Duration>,
     ) -> Response {
         let (mut parts, body) = res.into_parts();
         let decoder = Decoder::detect(
             &mut parts.headers,
-            super::body::response(body, timeout),
+            super::body::response(body, total_timeout, read_timeout),
             accepts,
         );
         let res = hyper::Response::from_parts(parts, decoder);
@@ -77,13 +79,18 @@ impl Response {
         self.res.headers_mut()
     }
 
-    /// Get the content-length of this response, if known.
+    /// Get the content length of the response, if it is known.
+    ///
+    /// This value does not directly represents the value of the `Content-Length`
+    /// header, but rather the size of the response's body. To read the header's
+    /// value, please use the [`Response::headers`] method instead.
     ///
     /// Reasons it may not be known:
     ///
-    /// - The server didn't send a `content-length` header.
-    /// - The response is compressed and automatically decoded (thus changing
-    ///   the actual decoded length).
+    /// - The response does not include a body (e.g. it responds to a `HEAD`
+    ///   request).
+    /// - The response is gzipped and automatically decoded (thus changing the
+    ///   actual decoded length).
     pub fn content_length(&self) -> Option<u64> {
         use hyper::body::Body;
 
@@ -132,7 +139,8 @@ impl Response {
     /// Get the full response text.
     ///
     /// This method decodes the response body with BOM sniffing
-    /// and with malformed sequences replaced with the REPLACEMENT CHARACTER.
+    /// and with malformed sequences replaced with the
+    /// [`char::REPLACEMENT_CHARACTER`].
     /// Encoding is determined from the `charset` parameter of `Content-Type` header,
     /// and defaults to `utf-8` if not presented.
     ///
@@ -173,7 +181,7 @@ impl Response {
     /// Get the full response text given a specific encoding.
     ///
     /// This method decodes the response body with BOM sniffing
-    /// and with malformed sequences replaced with the REPLACEMENT CHARACTER.
+    /// and with malformed sequences replaced with the [`char::REPLACEMENT_CHARACTER`].
     /// You can provide a default encoding for decoding the raw message, while the
     /// `charset` parameter of `Content-Type` header is still prioritized. For more information
     /// about the possible encoding name, please go to [`encoding_rs`] docs.
@@ -255,7 +263,7 @@ impl Response {
     ///
     /// # Errors
     ///
-    /// This method fails whenever the response body is not in JSON format
+    /// This method fails whenever the response body is not in JSON format,
     /// or it cannot be properly deserialized to target type `T`. For more
     /// details please see [`serde_json::from_reader`].
     ///
@@ -430,7 +438,7 @@ impl Response {
 impl fmt::Debug for Response {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Response")
-            .field("url", self.url())
+            .field("url", &self.url().as_str())
             .field("status", &self.status())
             .field("headers", self.headers())
             .finish()
@@ -440,12 +448,12 @@ impl fmt::Debug for Response {
 /// A `Response` can be piped as the `Body` of another request.
 impl From<Response> for Body {
     fn from(r: Response) -> Body {
-        Body::streaming(r.res.into_body())
+        Body::wrap(r.res.into_body())
     }
 }
 
 // I'm not sure this conversion is that useful... People should be encouraged
-// to use `http::Resposne`, not `reqwest::Response`.
+// to use `http::Response`, not `reqwest::Response`.
 impl<T: Into<Body>> From<http::Response<T>> for Response {
     fn from(r: http::Response<T>) -> Response {
         use crate::response::ResponseUrl;
@@ -475,7 +483,7 @@ impl<T: Into<Body>> From<http::Response<T>> for Response {
 impl From<Response> for http::Response<Body> {
     fn from(r: Response) -> http::Response<Body> {
         let (parts, body) = r.res.into_parts();
-        let body = Body::streaming(body);
+        let body = Body::wrap(body);
         http::Response::from_parts(parts, body)
     }
 }

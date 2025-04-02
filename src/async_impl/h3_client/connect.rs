@@ -6,6 +6,7 @@ use h3::client::SendRequest;
 use h3_quinn::{Connection, OpenStreams};
 use http::Uri;
 use hyper_util::client::legacy::connect::dns::Name;
+use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{ClientConfig, Endpoint, TransportConfig};
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
@@ -16,10 +17,48 @@ type H3Connection = (
     SendRequest<OpenStreams, Bytes>,
 );
 
+/// H3 Client Config
+#[derive(Clone)]
+pub(crate) struct H3ClientConfig {
+    /// Set the maximum HTTP/3 header size this client is willing to accept.
+    ///
+    /// See [header size constraints] section of the specification for details.
+    ///
+    /// [header size constraints]: https://www.rfc-editor.org/rfc/rfc9114.html#name-header-size-constraints
+    ///
+    /// Please see docs in [`Builder`] in [`h3`].
+    ///
+    /// [`Builder`]: https://docs.rs/h3/latest/h3/client/struct.Builder.html#method.max_field_section_size
+    pub(crate) max_field_section_size: Option<u64>,
+
+    /// Enable whether to send HTTP/3 protocol grease on the connections.
+    ///
+    /// Just like in HTTP/2, HTTP/3 also uses the concept of "grease"
+    ///
+    /// to prevent potential interoperability issues in the future.
+    /// In HTTP/3, the concept of grease is used to ensure that the protocol can evolve
+    /// and accommodate future changes without breaking existing implementations.
+    ///
+    /// Please see docs in [`Builder`] in [`h3`].
+    ///
+    /// [`Builder`]: https://docs.rs/h3/latest/h3/client/struct.Builder.html#method.send_grease
+    pub(crate) send_grease: Option<bool>,
+}
+
+impl Default for H3ClientConfig {
+    fn default() -> Self {
+        Self {
+            max_field_section_size: None,
+            send_grease: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct H3Connector {
     resolver: DynResolver,
     endpoint: Endpoint,
+    client_config: H3ClientConfig,
 }
 
 impl H3Connector {
@@ -28,8 +67,10 @@ impl H3Connector {
         tls: rustls::ClientConfig,
         local_addr: Option<IpAddr>,
         transport_config: TransportConfig,
+        client_config: H3ClientConfig,
     ) -> Result<H3Connector, BoxError> {
-        let mut config = ClientConfig::new(Arc::new(tls));
+        let quic_client_config = Arc::new(QuicClientConfig::try_from(tls)?);
+        let mut config = ClientConfig::new(quic_client_config);
         // FIXME: Replace this when there is a setter.
         config.transport_config(Arc::new(transport_config));
 
@@ -41,11 +82,19 @@ impl H3Connector {
         let mut endpoint = Endpoint::client(socket_addr)?;
         endpoint.set_default_client_config(config);
 
-        Ok(Self { resolver, endpoint })
+        Ok(Self {
+            resolver,
+            endpoint,
+            client_config,
+        })
     }
 
     pub async fn connect(&mut self, dest: Uri) -> Result<H3Connection, BoxError> {
-        let host = dest.host().ok_or("destination must have a host")?;
+        let host = dest
+            .host()
+            .ok_or("destination must have a host")?
+            .trim_start_matches('[')
+            .trim_end_matches(']');
         let port = dest.port_u16().unwrap_or(443);
 
         let addrs = if let Some(addr) = IpAddr::from_str(host).ok() {
@@ -73,7 +122,15 @@ impl H3Connector {
             match self.endpoint.connect(addr, server_name)?.await {
                 Ok(new_conn) => {
                     let quinn_conn = Connection::new(new_conn);
-                    return Ok(h3::client::new(quinn_conn).await?);
+                    let mut h3_client_builder = h3::client::builder();
+                    if let Some(max_field_section_size) = self.client_config.max_field_section_size
+                    {
+                        h3_client_builder.max_field_section_size(max_field_section_size);
+                    }
+                    if let Some(send_grease) = self.client_config.send_grease {
+                        h3_client_builder.send_grease(send_grease);
+                    }
+                    return Ok(h3_client_builder.build(quinn_conn).await?);
                 }
                 Err(e) => err = Some(e),
             }
