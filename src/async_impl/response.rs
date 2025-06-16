@@ -4,7 +4,7 @@ use std::pin::Pin;
 
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use hyper::{HeaderMap, StatusCode, Version};
+use hyper::{HeaderMap, RequestStats, StatusCode, Version};
 use hyper_util::client::legacy::connect::HttpInfo;
 #[cfg(feature = "json")]
 use serde::de::DeserializeOwned;
@@ -30,6 +30,7 @@ pub struct Response {
     // Boxed to save space (11 words to 1 word), and it's not accessed
     // frequently internally.
     url: Box<Url>,
+    stats: RequestStats,
 }
 
 impl Response {
@@ -38,6 +39,7 @@ impl Response {
         url: Url,
         accepts: Accepts,
         timeout: Option<Pin<Box<Sleep>>>,
+        stats: RequestStats,
     ) -> Response {
         let (mut parts, body) = res.into_parts();
         let decoder = Decoder::detect(
@@ -50,7 +52,13 @@ impl Response {
         Response {
             res,
             url: Box::new(url),
+            stats,
         }
+    }
+
+    /// Get the request stats for this response
+    pub fn stats(&self) -> &RequestStats {
+        &self.stats
     }
 
     /// Get the `StatusCode` of this `Response`.
@@ -466,6 +474,7 @@ impl<T: Into<Body>> From<http::Response<T>> for Response {
         Response {
             res,
             url: Box::new(url),
+            stats: RequestStats::empty(),
         }
     }
 }

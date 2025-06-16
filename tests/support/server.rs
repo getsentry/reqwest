@@ -92,7 +92,7 @@ where
                                 });
                                 let builder = builder.clone();
                                 tokio::spawn(async move {
-                                    let _ = builder.serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(io), svc).await;
+                                    let _ = builder.serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(io, None), svc).await;
                                 });
                             }
                         }
