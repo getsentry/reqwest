@@ -847,6 +847,7 @@ impl ClientBuilder {
                 proxies,
                 proxies_maybe_http_auth,
                 https_only: config.https_only,
+                #[cfg(feature = "hickory-dns")]
                 ip_filter: config.ip_filter,
             }),
         })
@@ -2227,6 +2228,7 @@ impl Client {
             }
         }
 
+        #[cfg(feature = "hickory-dns")]
         if let Err(err) = validate_url(self.inner.ip_filter, &url) {
             return Pending {
                 inner: PendingInner::Error(Some(err)),
@@ -2503,6 +2505,7 @@ struct ClientRef {
     proxies: Arc<Vec<Proxy>>,
     proxies_maybe_http_auth: bool,
     https_only: bool,
+    #[cfg(feature = "hickory-dns")]
     ip_filter: fn(IpAddr) -> bool,
 }
 
@@ -2876,6 +2879,7 @@ impl Future for PendingRequest {
 
                             remove_sensitive_headers(&mut headers, &self.url, &self.urls);
 
+                            #[cfg(feature = "hickory-dns")]
                             if let Err(err) = validate_url(self.client.ip_filter, &self.url) {
                                 return Poll::Ready(Err(err));
                             }
@@ -2978,6 +2982,7 @@ fn add_cookie_header(headers: &mut HeaderMap, cookie_store: &dyn cookie::CookieS
     }
 }
 
+#[cfg(feature = "hickory-dns")]
 fn validate_url(ip_filter: fn(IpAddr) -> bool, url: &Url) -> Result<(), crate::Error> {
     let is_valid_ip = match url.host() {
         Some(url::Host::Ipv4(ip)) => (ip_filter)(IpAddr::V4(ip)),
