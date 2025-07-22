@@ -2,7 +2,7 @@
 use std::any::Any;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 use std::{collections::HashMap, convert::TryInto, net::SocketAddr};
 use std::{fmt, str};
 
@@ -2107,6 +2107,7 @@ impl Client {
                 timeout,
 
                 poll_start: None,
+                poll_start_timestamp: None,
                 redirects: vec![],
             }),
         }
@@ -2384,6 +2385,7 @@ pin_project! {
         timeout: Option<Pin<Box<Sleep>>>,
 
         poll_start: Option<std::time::Instant>,
+        poll_start_timestamp: Option<u128>,
         redirects: Vec<RedirectStats>,
     }
 }
@@ -2547,6 +2549,12 @@ impl Future for PendingRequest {
 
         if self.poll_start.is_none() {
             self.poll_start = Some(std::time::Instant::now());
+            self.poll_start_timestamp = Some(
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or(Duration::from_secs(0))
+                    .as_millis(),
+            );
         }
 
         loop {
@@ -2722,6 +2730,7 @@ impl Future for PendingRequest {
                                         self.redirects.push(RedirectStats {
                                             finished: std::time::Instant::now(),
                                             connection_stats: stats,
+                                            url: uri.clone(),
                                         });
 
                                         ResponseFuture::Default(self.client.hyper.request(req))
@@ -2745,12 +2754,13 @@ impl Future for PendingRequest {
                 self.url.clone(),
                 self.client.accepts,
                 self.timeout.take(),
-                RequestStats {
-                    http_stats: stats,
-                    redirects: self.redirects.clone(),
-                    poll_start: self.poll_start.unwrap(),
-                    finish: std::time::Instant::now(),
-                },
+                RequestStats::new(
+                    stats,
+                    self.redirects.clone(),
+                    self.poll_start.unwrap(),
+                    self.poll_start_timestamp.unwrap(),
+                    Instant::now(),
+                ),
             );
             return Poll::Ready(Ok(res));
         }

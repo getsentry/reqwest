@@ -1,8 +1,7 @@
 use hickory_resolver::{
     config::{ResolverConfig, ResolverOpts},
-    lookup_ip::LookupIpIntoIter, 
-    TokioAsyncResolver,
-    system_conf,
+    lookup_ip::LookupIpIntoIter,
+    system_conf, TokioAsyncResolver,
 };
 use once_cell::sync::OnceCell;
 
@@ -48,7 +47,9 @@ impl Resolve for HickoryDnsResolver {
         let resolver = self.clone();
         Box::pin(async move {
             let filter = resolver.filter;
-            let resolver = resolver.state.get_or_try_init(|| new_resolver(resolver.config))?;
+            let resolver = resolver
+                .state
+                .get_or_try_init(|| new_resolver(resolver.config))?;
 
             let start = std::time::Instant::now();
             let lookup = resolver.lookup_ip(name.as_str()).await?;
@@ -87,7 +88,9 @@ impl Iterator for SocketAddrs {
     }
 }
 
-fn new_resolver(resolver_config: Option<(ResolverConfig, ResolverOpts)>) -> io::Result<TokioAsyncResolver> {
+fn new_resolver(
+    resolver_config: Option<(ResolverConfig, ResolverOpts)>,
+) -> io::Result<TokioAsyncResolver> {
     let (config, mut opts) = match resolver_config {
         Some((config, opts)) => (config, opts),
         None => system_conf::read_system_conf().map_err(|e| {
