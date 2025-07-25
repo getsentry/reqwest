@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 use std::{collections::HashMap, convert::TryInto, net::SocketAddr};
 use std::{fmt, str};
 
+use crate::{RedirectStats, RequestStats};
 use bytes::Bytes;
 use http::header::{
     Entry, HeaderMap, HeaderValue, ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH,
@@ -13,7 +14,6 @@ use http::header::{
 };
 use http::uri::Scheme;
 use http::Uri;
-use hyper::{RedirectStats, RequestStats};
 use hyper_util::client::legacy::connect::HttpConnector;
 #[cfg(feature = "default-tls")]
 use native_tls_crate::TlsConnector;
@@ -2553,7 +2553,7 @@ impl Future for PendingRequest {
                 SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
                     .unwrap_or(Duration::from_secs(0))
-                    .as_millis(),
+                    .as_micros(),
             );
         }
 
@@ -2677,7 +2677,7 @@ impl Future for PendingRequest {
                                     loc,
                                 )));
                             }
-
+                            let old_url = self.url.clone();
                             self.url = loc;
                             let mut headers =
                                 std::mem::replace(self.as_mut().headers(), HeaderMap::new());
@@ -2727,11 +2727,36 @@ impl Future for PendingRequest {
                                         *req.headers_mut() = headers.clone();
                                         std::mem::swap(self.as_mut().headers(), &mut headers);
 
-                                        self.redirects.push(RedirectStats {
-                                            finished: std::time::Instant::now(),
-                                            connection_stats: stats,
-                                            url: uri.clone(),
-                                        });
+                                        let request_body_size = self
+                                            .body
+                                            .as_ref()
+                                            .map(|o| o.as_ref().map(|b| b.len()))
+                                            .flatten()
+                                            .unwrap_or(0)
+                                            as u32;
+                                        let now = Instant::now();
+                                        let poll_start = self.poll_start.unwrap();
+                                        let poll_start_timestamp =
+                                            self.poll_start_timestamp.unwrap();
+
+                                        self.redirects.push(RedirectStats::new(
+                                            now,
+                                            poll_start,
+                                            poll_start_timestamp,
+                                            stats,
+                                            res.status().as_u16(),
+                                            try_uri(&old_url)
+                                                .expect("Uri already successfully parsed."),
+                                            request_body_size,
+                                        ));
+
+                                        self.poll_start = Some(now);
+                                        self.poll_start_timestamp = Some(
+                                            SystemTime::now()
+                                                .duration_since(SystemTime::UNIX_EPOCH)
+                                                .unwrap()
+                                                .as_micros(),
+                                        );
 
                                         ResponseFuture::Default(self.client.hyper.request(req))
                                     }
@@ -2749,6 +2774,13 @@ impl Future for PendingRequest {
                 }
             }
 
+            let status = res.status().as_u16();
+            let request_body_size = self
+                .body
+                .as_ref()
+                .map(|o| o.as_ref().map(|b| b.len()))
+                .flatten()
+                .unwrap_or(0) as u32;
             let res = Response::new(
                 res,
                 self.url.clone(),
@@ -2760,6 +2792,9 @@ impl Future for PendingRequest {
                     self.poll_start.unwrap(),
                     self.poll_start_timestamp.unwrap(),
                     Instant::now(),
+                    try_uri(&self.url).expect("Uri already successfully parsed."),
+                    status,
+                    request_body_size,
                 ),
             );
             return Poll::Ready(Ok(res));

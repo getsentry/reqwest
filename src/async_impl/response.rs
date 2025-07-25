@@ -1,15 +1,15 @@
-use std::fmt;
-use std::net::SocketAddr;
-use std::pin::Pin;
-
+use crate::RequestStats;
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use hyper::{HeaderMap, RequestStats, StatusCode, Version};
+use hyper::{HeaderMap, StatusCode, Version};
 use hyper_util::client::legacy::connect::HttpInfo;
 #[cfg(feature = "json")]
 use serde::de::DeserializeOwned;
 #[cfg(feature = "json")]
 use serde_json;
+use std::fmt;
+use std::net::SocketAddr;
+use std::pin::Pin;
 use tokio::time::Sleep;
 use url::Url;
 

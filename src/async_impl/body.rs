@@ -1,11 +1,10 @@
+use bytes::Bytes;
+use http_body::Body as HttpBody;
+use http_body_util::combinators::BoxBody;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-
-use bytes::Bytes;
-use http_body::Body as HttpBody;
-use http_body_util::combinators::BoxBody;
 //use sync_wrapper::SyncWrapper;
 #[cfg(feature = "stream")]
 use tokio::fs::File;

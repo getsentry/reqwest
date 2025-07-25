@@ -1,9 +1,8 @@
 #![cfg_attr(target_arch = "wasm32", allow(unused))]
+use crate::{StatusCode, Url};
 use std::error::Error as StdError;
 use std::fmt;
 use std::io;
-
-use crate::{StatusCode, Url};
 
 /// A `Result` alias where the `Err` case is `reqwest::Error`.
 pub type Result<T> = std::result::Result<T, Error>;

@@ -1,9 +1,8 @@
+use futures_util::TryFutureExt;
+use hyper_util::rt::TokioIo;
 use std::pin::Pin;
 use std::task::{self, Poll};
 use std::{fmt, io};
-
-use futures_util::TryFutureExt;
-use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 /// An upgraded HTTP connection.

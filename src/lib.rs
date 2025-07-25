@@ -251,11 +251,12 @@ macro_rules! if_hyper {
         $item
     )*}
 }
-
 pub use http::header;
 pub use http::Method;
 pub use http::{StatusCode, Version};
 pub use url::Url;
+
+pub use hyper::stats::{RedirectStats, RequestStats};
 
 // universal mods
 #[macro_use]
