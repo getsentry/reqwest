@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 use std::{collections::HashMap, convert::TryInto, net::SocketAddr};
 use std::{fmt, str};
 
+use crate::tls::TlsInfo;
 use crate::{RedirectStats, RequestStats};
 use bytes::Bytes;
 use http::header::{
@@ -2739,6 +2740,12 @@ impl Future for PendingRequest {
                                         let poll_start_timestamp =
                                             self.poll_start_timestamp.unwrap();
 
+                                        let certificate = res
+                                            .extensions()
+                                            .get::<TlsInfo>()
+                                            .and_then(|info| info.peer_certificate())
+                                            .and_then(|bytes| Some(bytes.to_vec()));
+
                                         self.redirects.push(RedirectStats::new(
                                             now,
                                             poll_start,
@@ -2748,6 +2755,7 @@ impl Future for PendingRequest {
                                             try_uri(&old_url)
                                                 .expect("Uri already successfully parsed."),
                                             request_body_size,
+                                            certificate,
                                         ));
 
                                         self.poll_start = Some(now);
@@ -2774,6 +2782,11 @@ impl Future for PendingRequest {
                 }
             }
 
+            let certificate = res
+                .extensions()
+                .get::<TlsInfo>()
+                .and_then(|info| info.peer_certificate())
+                .and_then(|bytes| Some(bytes.to_vec()));
             let status = res.status().as_u16();
             let request_body_size = self
                 .body
@@ -2795,6 +2808,7 @@ impl Future for PendingRequest {
                     try_uri(&self.url).expect("Uri already successfully parsed."),
                     status,
                     request_body_size,
+                    certificate,
                 ),
             );
             return Poll::Ready(Ok(res));
