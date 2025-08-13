@@ -141,11 +141,11 @@ mime_guess = { version = "2.0", default-features = false, optional = true }
 encoding_rs = { version = "0.8", optional = true }
 http-body = "1"
 http-body-util = "0.1"
-hyper = { git = "https://github.com/getsentry/hyper", rev = "71f79506ec5b97c756f7c35606cfc862dfee7868", features = [
+hyper = { git = "https://github.com/getsentry/hyper", rev = "ea400d80174114b12cf5078462e1cdd75d1627a8", features = [
     "http1",
     "client",
 ] }
-hyper-util = { git = "https://github.com/getsentry/hyper-util", rev = "288134da888b5510f78c9a86471787824407c6a5", features = [
+hyper-util = { git = "https://github.com/getsentry/hyper-util", rev = "335700c7180dc392b674bc93ac8939d44138f2fc", features = [
     "http1",
     "client",
     "client-legacy",
@@ -167,7 +167,7 @@ ipnet = "2.3"
 rustls-pemfile = { version = "2", optional = true }
 
 ## default-tls
-hyper-tls = { git = "https://github.com/getsentry/hyper-tls", rev = "ec67eabaae5374e7b1118eb1ed011b1ce05b5984", optional = true }
+hyper-tls = { git = "https://github.com/getsentry/hyper-tls", rev = "b3a21d25b6b3a0427ffc12db113f3a03a33b367c", optional = true }
 native-tls-crate = { version = "0.2.10", optional = true, package = "native-tls" }
 tokio-native-tls = { version = "0.3.0", optional = true }
 
@@ -213,13 +213,13 @@ futures-channel = { version = "0.3", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 env_logger = "0.10"
-hyper = { git = "https://github.com/getsentry/hyper", rev = "71f79506ec5b97c756f7c35606cfc862dfee7868", default-features = false, features = [
+hyper = { git = "https://github.com/getsentry/hyper", rev = "ea400d80174114b12cf5078462e1cdd75d1627a8", default-features = false, features = [
     "http1",
     "http2",
     "client",
     "server",
 ] }
-hyper-util = { git = "https://github.com/getsentry/hyper-util", rev = "288134da888b5510f78c9a86471787824407c6a5", features = [
+hyper-util = { git = "https://github.com/getsentry/hyper-util", rev = "335700c7180dc392b674bc93ac8939d44138f2fc", features = [
     "http1",
     "http2",
     "client",
