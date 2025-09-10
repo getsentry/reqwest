@@ -152,6 +152,14 @@ impl Error {
                 if hyper_err.is_connect() {
                     return true;
                 }
+            } else {
+                #[cfg(feature = "hickory-dns")]
+                if err
+                    .downcast_ref::<hickory_resolver::ResolveError>()
+                    .is_some()
+                {
+                    return true;
+                }
             }
 
             source = err.source();

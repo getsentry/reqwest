@@ -5,6 +5,8 @@
 //! `redirect::Policy` can be used with a `ClientBuilder`.
 
 use std::fmt;
+#[cfg(feature = "hickory-dns")]
+use std::net::IpAddr;
 use std::{error::Error as StdError, sync::Arc};
 
 use crate::header::{AUTHORIZATION, COOKIE, PROXY_AUTHORIZATION, REFERER, WWW_AUTHENTICATE};
@@ -267,9 +269,23 @@ pub(crate) struct TowerRedirectPolicy {
     referer: bool,
     urls: Vec<Url>,
     https_only: bool,
+    #[cfg(feature = "hickory-dns")]
+    filter: fn(std::net::IpAddr) -> bool,
 }
 
 impl TowerRedirectPolicy {
+    #[cfg(feature = "hickory-dns")]
+    pub(crate) fn new(policy: Policy, filter: fn(std::net::IpAddr) -> bool) -> Self {
+        Self {
+            policy: Arc::new(policy),
+            referer: false,
+            urls: Vec::new(),
+            https_only: false,
+            filter,
+        }
+    }
+
+    #[cfg(not(feature = "hickory-dns"))]
     pub(crate) fn new(policy: Policy) -> Self {
         Self {
             policy: Arc::new(policy),
@@ -302,6 +318,21 @@ fn make_referer(next: &Url, previous: &Url) -> Option<HeaderValue> {
     referer.as_str().parse().ok()
 }
 
+#[cfg(feature = "hickory-dns")]
+pub(crate) fn validate_url(ip_filter: fn(IpAddr) -> bool, url: &Url) -> Result<(), crate::Error> {
+    let is_valid_ip = match url.host() {
+        Some(url::Host::Ipv4(ip)) => (ip_filter)(IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => (ip_filter)(IpAddr::V6(ip)),
+        _ => true,
+    };
+
+    if !is_valid_ip {
+        let e = hickory_resolver::ResolveError::from("destination is restricted");
+        return Err(crate::Error::new(crate::error::Kind::Request, Some(e)));
+    }
+    Ok(())
+}
+
 impl TowerPolicy<async_impl::body::Body, crate::Error> for TowerRedirectPolicy {
     fn redirect(&mut self, attempt: &TowerAttempt<'_>) -> Result<TowerAction, crate::Error> {
         let previous_url =
@@ -313,6 +344,8 @@ impl TowerPolicy<async_impl::body::Body, crate::Error> for TowerRedirectPolicy {
         };
 
         self.urls.push(previous_url.clone());
+        #[cfg(feature = "hickory-dns")]
+        validate_url(self.filter, &next_url)?;
 
         match self.policy.check(attempt.status(), &next_url, &self.urls) {
             ActionKind::Follow => {
