@@ -53,11 +53,20 @@ impl Resolve for HickoryDnsResolver {
 
             let start = std::time::Instant::now();
             let lookup = resolver.lookup_ip(name.as_str()).await?;
-            if rand::random::<f32>() < 0.01 {
+            let elapsed = start.elapsed();
+
+            let hostname = name.as_str();
+            // XXX: Hack to make sure we get all dns logs for sending to vector
+            let is_vector_uc = hostname.contains("vector-uc-pops");
+            let should_log = is_vector_uc || elapsed.as_secs() >= 1 || rand::random::<f32>() < 0.01;
+
+            if should_log {
+                let resolved_ips: Vec<std::net::IpAddr> = lookup.iter().collect();
                 log::warn!(
-                    "DNS lookup for {} took {:?}",
-                    name.as_str(),
-                    start.elapsed()
+                    "DNS lookup for {} took {:?} → {:?}",
+                    hostname,
+                    elapsed,
+                    resolved_ips
                 );
             }
 
