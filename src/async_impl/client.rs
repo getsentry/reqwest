@@ -7,7 +7,6 @@ use std::{collections::HashMap, convert::TryInto, net::SocketAddr};
 use std::{fmt, str};
 
 use crate::tls::TlsInfo;
-use crate::{RedirectStats, RequestStats};
 use bytes::Bytes;
 use http::header::{
     Entry, HeaderMap, HeaderValue, ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH,
@@ -15,6 +14,7 @@ use http::header::{
 };
 use http::uri::Scheme;
 use http::Uri;
+use hyper::stats::RequestId;
 use hyper_util::client::legacy::connect::HttpConnector;
 #[cfg(feature = "default-tls")]
 use native_tls_crate::TlsConnector;
@@ -2011,7 +2011,7 @@ impl Client {
     }
 
     pub(super) fn execute_request(&self, req: Request) -> Pending {
-        let (method, url, mut headers, body, timeout, version) = req.pieces();
+        let (method, url, mut headers, body, timeout, version, req_id) = req.pieces();
         if url.scheme() != "http" && url.scheme() != "https" {
             return Pending::new_err(error::url_bad_scheme(url));
         }
@@ -2082,7 +2082,7 @@ impl Client {
             _ => {
                 let mut req = builder.body(body).expect("valid request parts");
                 *req.headers_mut() = headers.clone();
-                ResponseFuture::Default(self.inner.hyper.request(req))
+                ResponseFuture::Default(self.inner.hyper.request(req, req_id.clone()))
             }
         };
 
@@ -2097,6 +2097,7 @@ impl Client {
                 url,
                 headers,
                 body: reusable,
+                req_id,
 
                 urls: Vec::new(),
 
@@ -2109,7 +2110,6 @@ impl Client {
 
                 poll_start: None,
                 poll_start_timestamp: None,
-                redirects: vec![],
             }),
         }
     }
@@ -2387,7 +2387,7 @@ pin_project! {
 
         poll_start: Option<std::time::Instant>,
         poll_start_timestamp: Option<u128>,
-        redirects: Vec<RedirectStats>,
+        req_id: RequestId,
     }
 }
 
@@ -2466,7 +2466,12 @@ impl PendingRequest {
                     .body(body)
                     .expect("valid request parts");
                 *req.headers_mut() = self.headers.clone();
-                ResponseFuture::Default(self.client.hyper.request(req))
+                // TODO klochek If we ever implement retries, this is where we generate the new id.
+                ResponseFuture::Default(
+                    self.client
+                        .hyper
+                        .request(req, hyper::stats::next_request_id()),
+                )
             }
         };
 
@@ -2548,18 +2553,21 @@ impl Future for PendingRequest {
             }
         }
 
-        if self.poll_start.is_none() {
-            self.poll_start = Some(std::time::Instant::now());
-            self.poll_start_timestamp = Some(
-                SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or(Duration::from_secs(0))
-                    .as_micros(),
-            );
-        }
-
         loop {
-            let (stats, res) = match self.as_mut().in_flight().get_mut() {
+            if self.poll_start.is_none() {
+                self.poll_start = Some(std::time::Instant::now());
+                self.poll_start_timestamp = Some(
+                    SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or(Duration::from_secs(0))
+                        .as_micros(),
+                );
+
+                hyper::stats::get_request_stats(&self.req_id)
+                    .set_poll_start(self.poll_start.unwrap(), self.poll_start_timestamp.unwrap());
+            }
+
+            let res = match self.as_mut().in_flight().get_mut() {
                 ResponseFuture::Default(r) => match Pin::new(r).poll(cx) {
                     Poll::Ready(Err(e)) => {
                         #[cfg(feature = "http2")]
@@ -2736,9 +2744,6 @@ impl Future for PendingRequest {
                                             .unwrap_or(0)
                                             as u32;
                                         let now = Instant::now();
-                                        let poll_start = self.poll_start.unwrap();
-                                        let poll_start_timestamp =
-                                            self.poll_start_timestamp.unwrap();
 
                                         let certificate = res
                                             .extensions()
@@ -2746,27 +2751,26 @@ impl Future for PendingRequest {
                                             .and_then(|info| info.peer_certificate())
                                             .and_then(|bytes| Some(bytes.to_vec()));
 
-                                        self.redirects.push(RedirectStats::new(
-                                            now,
-                                            poll_start,
-                                            poll_start_timestamp,
-                                            stats,
-                                            res.status().as_u16(),
-                                            try_uri(&old_url)
-                                                .expect("Uri already successfully parsed."),
-                                            request_body_size,
-                                            certificate,
-                                        ));
+                                        let next_req_id = hyper::stats::next_request_id();
 
-                                        self.poll_start = Some(now);
-                                        self.poll_start_timestamp = Some(
-                                            SystemTime::now()
-                                                .duration_since(SystemTime::UNIX_EPOCH)
-                                                .unwrap()
-                                                .as_micros(),
-                                        );
+                                        hyper::stats::get_request_stats(&self.req_id)
+                                            .set_redirect(next_req_id.clone())
+                                            .set_finished(now)
+                                            .set_status_code(res.status().as_u16())
+                                            .set_url(
+                                                try_uri(&old_url)
+                                                    .expect("Uri already successfully parsed."),
+                                            )
+                                            .set_request_body_size(request_body_size)
+                                            .set_certificate(certificate.clone());
 
-                                        ResponseFuture::Default(self.client.hyper.request(req))
+                                        self.req_id = next_req_id.clone();
+                                        self.poll_start = None;
+                                        self.poll_start_timestamp = None;
+
+                                        ResponseFuture::Default(
+                                            self.client.hyper.request(req, next_req_id),
+                                        )
                                     }
                                 };
 
@@ -2782,6 +2786,8 @@ impl Future for PendingRequest {
                 }
             }
 
+            let finish = Instant::now();
+
             let certificate = res
                 .extensions()
                 .get::<TlsInfo>()
@@ -2794,22 +2800,22 @@ impl Future for PendingRequest {
                 .map(|o| o.as_ref().map(|b| b.len()))
                 .flatten()
                 .unwrap_or(0) as u32;
+
+            let mut req_stats = hyper::stats::get_request_stats(&self.req_id);
+
+            req_stats
+                .set_poll_start(self.poll_start.unwrap(), self.poll_start_timestamp.unwrap())
+                .set_finished(finish)
+                .set_status_code(status)
+                .set_url(try_uri(&self.url).expect("Uri already successfully parsed."))
+                .set_request_body_size(request_body_size)
+                .set_certificate(certificate.clone());
+
             let res = Response::new(
                 res,
                 self.url.clone(),
                 self.client.accepts,
                 self.timeout.take(),
-                RequestStats::new(
-                    stats,
-                    self.redirects.clone(),
-                    self.poll_start.unwrap(),
-                    self.poll_start_timestamp.unwrap(),
-                    Instant::now(),
-                    try_uri(&self.url).expect("Uri already successfully parsed."),
-                    status,
-                    request_body_size,
-                    certificate,
-                ),
             );
             return Poll::Ready(Ok(res));
         }

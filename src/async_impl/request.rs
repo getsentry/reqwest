@@ -3,6 +3,7 @@ use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
+use hyper::stats::RequestId;
 use serde::Serialize;
 #[cfg(feature = "json")]
 use serde_json;
@@ -26,6 +27,7 @@ pub struct Request {
     body: Option<Body>,
     timeout: Option<Duration>,
     version: Version,
+    req_id: RequestId,
 }
 
 /// A builder to construct the properties of a `Request`.
@@ -48,6 +50,7 @@ impl Request {
             body: None,
             timeout: None,
             version: Version::default(),
+            req_id: hyper::stats::next_request_id(),
         }
     }
 
@@ -123,6 +126,11 @@ impl Request {
         &mut self.version
     }
 
+    /// Gets the unique request id for this request.
+    pub fn req_id(&self) -> &RequestId {
+        &self.req_id
+    }
+
     /// Attempt to clone the request.
     ///
     /// `None` is returned if the request can not be cloned, i.e. if the body is a stream.
@@ -148,6 +156,7 @@ impl Request {
         Option<Body>,
         Option<Duration>,
         Version,
+        RequestId,
     ) {
         (
             self.method,
@@ -156,6 +165,7 @@ impl Request {
             self.body,
             self.timeout,
             self.version,
+            self.req_id,
         )
     }
 }
@@ -618,6 +628,7 @@ where
             body: Some(body.into()),
             timeout: None,
             version,
+            req_id: hyper::stats::next_request_id(),
         })
     }
 }
