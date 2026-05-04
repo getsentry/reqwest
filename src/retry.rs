@@ -41,6 +41,9 @@ use std::time::Duration;
 
 use tower::retry::budget::{Budget as _, TpsBudget as Budget};
 
+#[cfg(docsrs)]
+pub use classify::ReqRep;
+
 /// Builder to configure retries
 ///
 /// Construct with [`for_host()`].
@@ -150,7 +153,7 @@ impl Builder {
     ///
     /// This value is used in combination with a token budget that is applied
     /// to all requests. Even if the budget would allow more requests, this
-    /// limit will prevent. Likewise, the budget may prevent retying up to
+    /// limit will prevent. Likewise, the budget may prevent retrying up to
     /// `max` times. This setting prevents a single request from consuming
     /// the entire budget.
     ///
@@ -393,30 +396,41 @@ mod classify {
         }
     }
 
+    /// A request/response result to inspect for possible retries.
+    ///
+    /// This is passed to a `classify` function.
     #[derive(Debug)]
     pub struct ReqRep<'a>(&'a super::Req, Result<http::StatusCode, &'a crate::Error>);
 
     impl ReqRep<'_> {
+        /// Access the request method.
         pub fn method(&self) -> &http::Method {
             self.0.method()
         }
 
+        /// Access the request URI.
         pub fn uri(&self) -> &http::Uri {
             self.0.uri()
         }
 
+        /// Access the response status, if it did not error.
         pub fn status(&self) -> Option<http::StatusCode> {
             self.1.ok()
         }
 
+        /// Access the error, if a response was not received.
         pub fn error(&self) -> Option<&(dyn std::error::Error + 'static)> {
             self.1.as_ref().err().map(|e| &**e as _)
         }
 
+        /// Classify this attempt as retryable.
         pub fn retryable(self) -> Action {
             Action::Retryable
         }
 
+        /// Classify this attempt as success.
+        ///
+        /// Even if it was a domain error, a "success" means it will not retry.
         pub fn success(self) -> Action {
             Action::Success
         }

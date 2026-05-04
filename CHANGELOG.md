@@ -1,3 +1,65 @@
+## v0.13.3
+
+- Fix CertificateRevocationList parsing of PEM values.
+- Fix logging in resolver to only show host, not full URL.
+- Fix hickory-dns to fallback to a default if `/etc/resolv.conf` fails.
+- Fix HTTP/3 to handle `STOP_SENDING` as not an error.
+- Fix HTTP/3 pool to remove timed out QUIC connections.
+- Fix HTTP/3 connection establishment picking IPv4 and IPv6.
+- Upgrade rustls-platform-verifier.
+- (wasm) Only use wasm-bindgen on unknown-* targets.
+
+## v0.13.2
+
+- Fix HTTP/2 and native-tls ALPN feature combinations.
+- Fix HTTP/3 to send h3 ALPN.
+- (wasm) fix `RequestBuilder::json()` from override previously set content-type.
+
+## v0.13.1
+
+- Fixes compiling with rustls on Android targets.
+
+# v0.13.0
+
+- **Breaking changes**:
+  - `rustls` is now the default TLS backend, instead of `native-tls`.
+  - `rustls` crypto provider defaults to aws-lc instead of _ring_. (`rustls-no-provider` exists if you want a different crypto provider)
+  - `rustls-tls` has been renamed to `rustls`.
+  - rustls roots features removed, `rustls-platform-verifier` is used by default.
+    - To use different roots, call `tls_certs_only(your_roots)`.
+  - `native-tls` now includes ALPN. To disable, use `native-tls-no-alpn`.
+  - `query` and `form` are now crate features, disabled by default.
+  - Long-deprecated methods and crate features have been removed (such as `trust-dns`, which was renamed `hickory-dns` a while ago).
+- Many TLS-related methods renamed to improve autocompletion and discovery, but previous name left in place with a "soft" deprecation. (just documented, no warnings)
+  - For example, prefer `tls_backend_rustls()` over `use_rustls_tls()`.
+
+
+## v0.12.28
+
+- Fix compiling on Windows if TLS and SOCKS features are not enabled.
+
+## v0.12.27
+
+- Add `ClientBuilder::windows_named_pipe(name)` option that will force all requests over that Windows Named Piper.
+
+## v0.12.26
+
+- Fix sending `Accept-Encoding` header only with values configured with reqwest, regardless of underlying tower-http config.
+
+## v0.12.25
+
+- Add `Error::is_upgrade()` to determine if the error was from an HTTP upgrade.
+- Fix sending `Proxy-Authorization` if only username is configured.
+- Fix sending `Proxy-Authorization` to HTTPS proxies when the target is HTTP.
+- Refactor internal decompression handling to use tower-http.
+
+## v0.12.24
+
+- Refactor cookie handling to an internal middleware.
+- Refactor internal random generator.
+- Refactor base64 encoding to reduce a copy.
+- Documentation updates.
+
 ## v0.12.23
 
 - Add `ClientBuilder::unix_socket(path)` option that will force all requests over that Unix Domain Socket.
