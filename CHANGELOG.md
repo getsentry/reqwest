@@ -1,3 +1,119 @@
+## v0.13.3
+
+- Fix CertificateRevocationList parsing of PEM values.
+- Fix logging in resolver to only show host, not full URL.
+- Fix hickory-dns to fallback to a default if `/etc/resolv.conf` fails.
+- Fix HTTP/3 to handle `STOP_SENDING` as not an error.
+- Fix HTTP/3 pool to remove timed out QUIC connections.
+- Fix HTTP/3 connection establishment picking IPv4 and IPv6.
+- Upgrade rustls-platform-verifier.
+- (wasm) Only use wasm-bindgen on unknown-* targets.
+
+## v0.13.2
+
+- Fix HTTP/2 and native-tls ALPN feature combinations.
+- Fix HTTP/3 to send h3 ALPN.
+- (wasm) fix `RequestBuilder::json()` from override previously set content-type.
+
+## v0.13.1
+
+- Fixes compiling with rustls on Android targets.
+
+# v0.13.0
+
+- **Breaking changes**:
+  - `rustls` is now the default TLS backend, instead of `native-tls`.
+  - `rustls` crypto provider defaults to aws-lc instead of _ring_. (`rustls-no-provider` exists if you want a different crypto provider)
+  - `rustls-tls` has been renamed to `rustls`.
+  - rustls roots features removed, `rustls-platform-verifier` is used by default.
+    - To use different roots, call `tls_certs_only(your_roots)`.
+  - `native-tls` now includes ALPN. To disable, use `native-tls-no-alpn`.
+  - `query` and `form` are now crate features, disabled by default.
+  - Long-deprecated methods and crate features have been removed (such as `trust-dns`, which was renamed `hickory-dns` a while ago).
+- Many TLS-related methods renamed to improve autocompletion and discovery, but previous name left in place with a "soft" deprecation. (just documented, no warnings)
+  - For example, prefer `tls_backend_rustls()` over `use_rustls_tls()`.
+
+
+## v0.12.28
+
+- Fix compiling on Windows if TLS and SOCKS features are not enabled.
+
+## v0.12.27
+
+- Add `ClientBuilder::windows_named_pipe(name)` option that will force all requests over that Windows Named Piper.
+
+## v0.12.26
+
+- Fix sending `Accept-Encoding` header only with values configured with reqwest, regardless of underlying tower-http config.
+
+## v0.12.25
+
+- Add `Error::is_upgrade()` to determine if the error was from an HTTP upgrade.
+- Fix sending `Proxy-Authorization` if only username is configured.
+- Fix sending `Proxy-Authorization` to HTTPS proxies when the target is HTTP.
+- Refactor internal decompression handling to use tower-http.
+
+## v0.12.24
+
+- Refactor cookie handling to an internal middleware.
+- Refactor internal random generator.
+- Refactor base64 encoding to reduce a copy.
+- Documentation updates.
+
+## v0.12.23
+
+- Add `ClientBuilder::unix_socket(path)` option that will force all requests over that Unix Domain Socket.
+- Add `ClientBuilder::retry(policy)` and `reqwest::retry::Builder` to configure automatic retries.
+- Add `ClientBuilder::dns_resolver2()` with more ergonomic argument bounds, allowing more resolver implementations.
+- Add `http3_*` options to `blocking::ClientBuilder`.
+- Fix default TCP timeout values to enabled and faster.
+- Fix SOCKS proxies to default to port 1080
+- (wasm) Add cache methods to `RequestBuilder`.
+
+## v0.12.22
+
+- Fix socks proxies when resolving IPv6 destinations.
+
+## v0.12.21
+
+- Fix socks proxy to use `socks4a://` instead of `socks4h://`.
+- Fix `Error::is_timeout()` to check for hyper and IO timeouts too.
+- Fix request `Error` to again include URLs when possible.
+- Fix socks connect error to include more context.
+- (wasm) implement `Default` for `Body`.
+
+## v0.12.20
+
+- Add `ClientBuilder::tcp_user_timeout(Duration)` option to set `TCP_USER_TIMEOUT`.
+- Fix proxy headers only using the first matched proxy.
+- (wasm) Fix re-adding `Error::is_status()`.
+
+## v0.12.19
+
+- Fix redirect that changes the method to GET should remove payload headers.
+- Fix redirect to only check the next scheme if the policy action is to follow.
+- (wasm) Fix compilation error if `cookies` feature is enabled (by the way, it's a noop feature in wasm).
+
+## v0.12.18
+
+- Fix compilation when `socks` enabled without TLS.
+
+## v0.12.17
+
+- Fix compilation on macOS.
+
+## v0.12.16
+
+- Add `ClientBuilder::http3_congestion_bbr()` to enable BBR congestion control.
+- Add `ClientBuilder::http3_send_grease()` to configure whether to send use QUIC grease.
+- Add `ClientBuilder::http3_max_field_section_size()` to configure the maximum response headers.
+- Add `ClientBuilder::tcp_keepalive_interval()` to configure TCP probe interval.
+- Add `ClientBuilder::tcp_keepalive_retries()` to configure TCP probe count.
+- Add `Proxy::headers()` to add extra headers that should be sent to a proxy.
+- Fix `redirect::Policy::limit()` which had an off-by-1 error, allowing 1 more redirect than specified.
+- Fix HTTP/3 to support streaming request bodies.
+- (wasm) Fix null bodies when calling `Response::bytes_stream()`.
+
 ## v0.12.15
 
 - Fix Windows to support both `ProxyOverride` and `NO_PROXY`.

@@ -11,6 +11,9 @@ use tokio::net::TcpStream;
 use tokio::runtime;
 use tokio::sync::oneshot;
 
+#[cfg(feature = "http3")]
+static CRYPTO_PROVIDER_INSTALLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 pub struct Server {
     addr: net::SocketAddr,
     panic_rx: std_mpsc::Receiver<()>,
@@ -56,15 +59,20 @@ where
     F: Fn(http::Request<hyper::body::Incoming>) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = http::Response<reqwest::Body>> + Send + 'static,
 {
-    http_with_config(func, |_builder| {})
+    let infall = move |req| {
+        let fut = func(req);
+        async move { Ok::<_, Infallible>(fut.await) }
+    };
+    http_with_config(infall, |_builder| {})
 }
 
 type Builder = hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor>;
 
-pub fn http_with_config<F1, Fut, F2, Bu>(func: F1, apply_config: F2) -> Server
+pub fn http_with_config<F1, Fut, E, F2, Bu>(func: F1, apply_config: F2) -> Server
 where
     F1: Fn(http::Request<hyper::body::Incoming>) -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = http::Response<reqwest::Body>> + Send + 'static,
+    Fut: Future<Output = Result<http::Response<reqwest::Body>, E>> + Send + 'static,
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
     F2: FnOnce(&mut Builder) -> Bu + Send + 'static,
 {
     // Spawn new runtime in thread to prevent reactor execution context conflict
@@ -95,25 +103,37 @@ where
                     let mut builder =
                         hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
                     apply_config(&mut builder);
+                    let mut tasks = tokio::task::JoinSet::new();
+                    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
 
                     loop {
                         tokio::select! {
                             _ = &mut shutdown_rx => {
+                                graceful.shutdown().await;
                                 break;
                             }
                             accepted = listener.accept() => {
                                 let (io, _) = accepted.expect("accepted");
                                 let func = func.clone();
-                                let svc = hyper::service::service_fn(move |req| {
-                                    let fut = func(req);
-                                    async move { Ok::<_, Infallible>(fut.await) }
-                                });
+                                let svc = hyper::service::service_fn(func);
                                 let builder = builder.clone();
                                 let events_tx = events_tx.clone();
-                                tokio::spawn(async move {
-                                    let _ = builder.serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(io), svc).await;
+                                let watcher = graceful.watcher();
+
+                                tasks.spawn(async move {
+                                    let conn = builder.serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(io), svc);
+                                    let _ = watcher.watch(conn).await;
                                     let _ = events_tx.send(Event::ConnectionClosed);
                                 });
+                            }
+                        }
+                    }
+
+                    // try to drain
+                    while let Some(result) = tasks.join_next().await {
+                        if let Err(e) = result {
+                            if e.is_panic() {
+                                std::panic::resume_unwind(e.into_panic());
                             }
                         }
                     }
@@ -151,7 +171,49 @@ impl Http3 {
 
     pub fn build<F1, Fut>(self, func: F1) -> Server
     where
-        F1: Fn(http::Request<http_body_util::combinators::BoxBody<bytes::Bytes, h3::Error>>) -> Fut
+        F1: Fn(
+                http::Request<
+                    http_body_util::combinators::BoxBody<bytes::Bytes, h3::error::StreamError>,
+                >,
+            ) -> Fut
+            + Clone
+            + Send
+            + 'static,
+        Fut: Future<Output = http::Response<reqwest::Body>> + Send + 'static,
+    {
+        self.build_server(func, None)
+    }
+
+    pub fn build_with_stop_sending_before_response<F1, Fut>(
+        self,
+        func: F1,
+        code: h3::error::Code,
+    ) -> Server
+    where
+        F1: Fn(
+                http::Request<
+                    http_body_util::combinators::BoxBody<bytes::Bytes, h3::error::StreamError>,
+                >,
+            ) -> Fut
+            + Clone
+            + Send
+            + 'static,
+        Fut: Future<Output = http::Response<reqwest::Body>> + Send + 'static,
+    {
+        self.build_server(func, Some(code))
+    }
+
+    fn build_server<F1, Fut>(
+        self,
+        func: F1,
+        stop_sending_before_response: Option<h3::error::Code>,
+    ) -> Server
+    where
+        F1: Fn(
+                http::Request<
+                    http_body_util::combinators::BoxBody<bytes::Bytes, h3::error::StreamError>,
+                >,
+            ) -> Fut
             + Clone
             + Send
             + 'static,
@@ -174,6 +236,8 @@ impl Http3 {
 
             let cert = std::fs::read("tests/support/server.cert").unwrap().into();
             let key = std::fs::read("tests/support/server.key").unwrap().try_into().unwrap();
+
+            CRYPTO_PROVIDER_INSTALLED.get_or_init(install_default_crypto_provider);
 
             let mut tls_config = rustls::ServerConfig::builder()
                 .with_no_client_auth()
@@ -211,35 +275,40 @@ impl Http3 {
                                     let events_tx = events_tx.clone();
                                     let func = func.clone();
                                     tokio::spawn(async move {
-                                        while let Ok(Some((req, stream))) = h3_conn.accept().await {
+                                        while let Ok(Some(resolver)) = h3_conn.accept().await {
                                             let events_tx = events_tx.clone();
                                             let func = func.clone();
                                             tokio::spawn(async move {
-                                                let (mut tx, rx) = stream.split();
-                                                let body = futures_util::stream::unfold(rx, |mut rx| async move {
-                                                    match rx.recv_data().await {
-                                                        Ok(Some(mut buf)) => {
-                                                            Some((Ok(hyper::body::Frame::data(buf.copy_to_bytes(buf.remaining()))), rx))
-                                                        },
-                                                        Ok(None) => None,
-                                                        Err(err) => {
-                                                            Some((Err(err), rx))
+                                                if let Ok((req, stream)) = resolver.resolve_request().await {
+                                                    let (mut tx, mut rx) = stream.split();
+                                                    if let Some(code) = stop_sending_before_response {
+                                                        rx.stop_sending(code);
+                                                    }
+                                                    let body = futures_util::stream::unfold(rx, |mut rx| async move {
+                                                        match rx.recv_data().await {
+                                                            Ok(Some(mut buf)) => {
+                                                                Some((Ok(hyper::body::Frame::data(buf.copy_to_bytes(buf.remaining()))), rx))
+                                                            },
+                                                            Ok(None) => None,
+                                                            Err(err) => {
+                                                                Some((Err(err), rx))
+                                                            }
+                                                        }
+                                                    });
+                                                    let body = BodyExt::boxed(http_body_util::StreamBody::new(body));
+                                                    let resp = func(req.map(move |()| body)).await;
+                                                    let (parts, mut body) = resp.into_parts();
+                                                    let resp = http::Response::from_parts(parts, ());
+                                                    tx.send_response(resp).await.unwrap();
+
+                                                    while let Some(Ok(frame)) = body.frame().await {
+                                                        if let Ok(data) = frame.into_data() {
+                                                            tx.send_data(data).await.unwrap();
                                                         }
                                                     }
-                                                });
-                                                let body = BodyExt::boxed(http_body_util::StreamBody::new(body));
-                                                let resp = func(req.map(move |()| body)).await;
-                                                let (parts, mut body) = resp.into_parts();
-                                                let resp = http::Response::from_parts(parts, ());
-                                                tx.send_response(resp).await.unwrap();
-
-                                                while let Some(Ok(frame)) = body.frame().await {
-                                                    if let Ok(data) = frame.into_data() {
-                                                        tx.send_data(data).await.unwrap();
-                                                    }
+                                                    tx.finish().await.unwrap();
+                                                    events_tx.send(Event::ConnectionClosed).unwrap();
                                                 }
-                                                tx.finish().await.unwrap();
-                                                events_tx.send(Event::ConnectionClosed).unwrap();
                                             });
                                         }
                                     });
@@ -260,6 +329,24 @@ impl Http3 {
         .join()
         .unwrap()
     }
+}
+
+#[cfg(feature = "http3")]
+fn install_default_crypto_provider() -> bool {
+    #[cfg(not(any(feature = "__rustls-ring", feature = "__rustls-aws-lc-rs")))]
+    panic!("No provider set");
+
+    #[cfg(all(feature = "__rustls-ring", not(feature = "__rustls-aws-lc-rs")))]
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install the default Ring TLS provider");
+
+    #[cfg(feature = "__rustls-aws-lc-rs")]
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("failed to install the default TLS provider");
+
+    true
 }
 
 pub fn low_level_with_response<F>(do_response: F) -> Server

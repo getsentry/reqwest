@@ -3,6 +3,7 @@ use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
+#[cfg(any(feature = "query", feature = "form", feature = "json"))]
 use serde::Serialize;
 #[cfg(feature = "json")]
 use serde_json;
@@ -12,11 +13,14 @@ use super::client::{Client, Pending};
 #[cfg(feature = "multipart")]
 use super::multipart;
 use super::response::Response;
+use crate::config::{RequestConfig, TotalTimeout};
 #[cfg(feature = "multipart")]
 use crate::header::CONTENT_LENGTH;
-use crate::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
+#[cfg(any(feature = "multipart", feature = "form", feature = "json"))]
+use crate::header::CONTENT_TYPE;
+use crate::header::{HeaderMap, HeaderName, HeaderValue};
 use crate::{Method, Url};
-use http::{request::Parts, Request as HttpRequest, Version};
+use http::{request::Parts, Extensions, Request as HttpRequest, Version};
 
 /// A request which can be executed with `Client::execute()`.
 pub struct Request {
@@ -24,8 +28,8 @@ pub struct Request {
     url: Url,
     headers: HeaderMap,
     body: Option<Body>,
-    timeout: Option<Duration>,
     version: Version,
+    extensions: Extensions,
 }
 
 /// A builder to construct the properties of a `Request`.
@@ -46,8 +50,8 @@ impl Request {
             url,
             headers: HeaderMap::new(),
             body: None,
-            timeout: None,
             version: Version::default(),
+            extensions: Extensions::new(),
         }
     }
 
@@ -99,16 +103,28 @@ impl Request {
         &mut self.body
     }
 
+    /// Get the extensions.
+    #[inline]
+    pub(crate) fn extensions(&self) -> &Extensions {
+        &self.extensions
+    }
+
+    /// Get a mutable reference to the extensions.
+    #[inline]
+    pub(crate) fn extensions_mut(&mut self) -> &mut Extensions {
+        &mut self.extensions
+    }
+
     /// Get the timeout.
     #[inline]
     pub fn timeout(&self) -> Option<&Duration> {
-        self.timeout.as_ref()
+        RequestConfig::<TotalTimeout>::get(&self.extensions)
     }
 
     /// Get a mutable reference to the timeout.
     #[inline]
     pub fn timeout_mut(&mut self) -> &mut Option<Duration> {
-        &mut self.timeout
+        RequestConfig::<TotalTimeout>::get_mut(&mut self.extensions)
     }
 
     /// Get the http version.
@@ -135,27 +151,19 @@ impl Request {
         *req.timeout_mut() = self.timeout().copied();
         *req.headers_mut() = self.headers().clone();
         *req.version_mut() = self.version();
+        *req.extensions_mut() = self.extensions().clone();
         req.body = body;
         Some(req)
     }
 
-    pub(super) fn pieces(
-        self,
-    ) -> (
-        Method,
-        Url,
-        HeaderMap,
-        Option<Body>,
-        Option<Duration>,
-        Version,
-    ) {
+    pub(super) fn pieces(self) -> (Method, Url, HeaderMap, Option<Body>, Version, Extensions) {
         (
             self.method,
             self.url,
             self.headers,
             self.body,
-            self.timeout,
             self.version,
+            self.extensions,
         )
     }
 }
@@ -346,9 +354,15 @@ impl RequestBuilder {
     /// as `.query(&[("key", "val")])`. It's also possible to serialize structs
     /// and maps into a key-value pair.
     ///
+    /// # Optional
+    ///
+    /// This requires the optional `query` feature to be enabled.
+    ///
     /// # Errors
     /// This method will fail if the object you provide cannot be serialized
     /// into a query string.
+    #[cfg(feature = "query")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "query")))]
     pub fn query<T: Serialize + ?Sized>(mut self, query: &T) -> RequestBuilder {
         let mut error = None;
         if let Ok(ref mut req) = self.request {
@@ -402,10 +416,16 @@ impl RequestBuilder {
     /// # }
     /// ```
     ///
+    /// # Optional
+    ///
+    /// This requires the optional `form` feature to be enabled.
+    ///
     /// # Errors
     ///
     /// This method fails if the passed value cannot be serialized into
     /// url encoded format
+    #[cfg(feature = "form")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "form")))]
     pub fn form<T: Serialize + ?Sized>(mut self, form: &T) -> RequestBuilder {
         let mut error = None;
         if let Ok(ref mut req) = self.request {
@@ -444,10 +464,9 @@ impl RequestBuilder {
         if let Ok(ref mut req) = self.request {
             match serde_json::to_vec(json) {
                 Ok(body) => {
-                    if !req.headers().contains_key(CONTENT_TYPE) {
-                        req.headers_mut()
-                            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-                    }
+                    req.headers_mut()
+                        .entry(CONTENT_TYPE)
+                        .or_insert_with(|| HeaderValue::from_static("application/json"));
                     *req.body_mut() = Some(body.into());
                 }
                 Err(err) => error = Some(crate::error::builder(err)),
@@ -456,19 +475,6 @@ impl RequestBuilder {
         if let Some(err) = error {
             self.request = Err(err);
         }
-        self
-    }
-
-    // This was a shell only meant to help with rendered documentation.
-    // However, docs.rs can now show the docs for the wasm platforms, so this
-    // is no longer needed.
-    //
-    // You should not otherwise depend on this function. It's deprecation
-    // is just to nudge people to reduce breakage. It may be removed in a
-    // future patch version.
-    #[doc(hidden)]
-    #[cfg_attr(target_arch = "wasm32", deprecated)]
-    pub fn fetch_mode_no_cors(self) -> RequestBuilder {
         self
     }
 
@@ -612,6 +618,7 @@ where
             uri,
             headers,
             version,
+            extensions,
             ..
         } = parts;
         let url = Url::parse(&uri.to_string()).map_err(crate::error::builder)?;
@@ -620,8 +627,8 @@ where
             url,
             headers,
             body: Some(body.into()),
-            timeout: None,
             version,
+            extensions,
         })
     }
 }
@@ -636,6 +643,7 @@ impl TryFrom<Request> for HttpRequest<Body> {
             headers,
             body,
             version,
+            extensions,
             ..
         } = req;
 
@@ -647,21 +655,21 @@ impl TryFrom<Request> for HttpRequest<Body> {
             .map_err(crate::error::builder)?;
 
         *req.headers_mut() = headers;
+        *req.extensions_mut() = extensions;
         Ok(req)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #![cfg(not(feature = "rustls-tls-manual-roots-no-provider"))]
+    #![cfg(not(feature = "rustls-no-provider"))]
 
-    use super::{Client, HttpRequest, Request, RequestBuilder, Version};
-    use crate::Method;
-    use serde::Serialize;
+    use super::*;
+    #[cfg(feature = "query")]
     use std::collections::BTreeMap;
-    use std::convert::TryFrom;
 
     #[test]
+    #[cfg(feature = "query")]
     fn add_query_append() {
         let client = Client::new();
         let some_url = "https://google.com/";
@@ -675,6 +683,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "query")]
     fn add_query_append_same() {
         let client = Client::new();
         let some_url = "https://google.com/";
@@ -687,6 +696,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "query")]
     fn add_query_struct() {
         #[derive(Serialize)]
         struct Params {
@@ -710,6 +720,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "query")]
     fn add_query_map() {
         let mut params = BTreeMap::new();
         params.insert("foo", "bar");
@@ -751,6 +762,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "query")]
     fn normalize_empty_query() {
         let client = Client::new();
         let some_url = "https://google.com/";
