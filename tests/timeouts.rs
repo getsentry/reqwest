@@ -1,5 +1,5 @@
 #![cfg(not(target_arch = "wasm32"))]
-#![cfg(not(feature = "rustls-tls-manual-roots-no-provider"))]
+#![cfg(not(feature = "rustls-no-provider"))]
 mod support;
 use support::server;
 
@@ -277,6 +277,26 @@ async fn read_timeout_allows_slow_response_body() {
     let body = res.text().await.expect("body text");
 
     assert_eq!(body, "012");
+}
+
+/// Tests that a big [`Duration`] does not overflow the system clock
+/// and instead behaves as if no timeout was set (the request completes normally).
+#[cfg(feature = "blocking")]
+#[test]
+fn big_timeout_duration_does_not_overflow() {
+    let _ = env_logger::try_init();
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::MAX)
+        .build()
+        .unwrap();
+
+    let server = server::http(move |_req| async { http::Response::default() });
+
+    let url = format!("http://{}/max-timeout", server.addr());
+    let res = client.get(&url).send().expect("request should succeed");
+
+    assert!(res.status().is_success());
 }
 
 /// Tests that internal client future cancels when the oneshot channel

@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
+use http::uri::Scheme;
 use http::{header::HeaderValue, HeaderMap, Uri};
 use hyper_util::client::proxy::matcher;
 
@@ -452,11 +453,12 @@ impl Proxy {
 }
 
 fn cache_maybe_has_http_auth(url: &Url, extra: &Option<HeaderValue>) -> bool {
-    url.scheme() == "http" && (url.password().is_some() || extra.is_some())
+    (url.scheme() == "http" || url.scheme() == "https")
+        && (url.username().len() > 0 || url.password().is_some() || extra.is_some())
 }
 
 fn cache_maybe_has_http_custom_headers(url: &Url, extra: &Option<HeaderMap>) -> bool {
-    url.scheme() == "http" && extra.is_some()
+    (url.scheme() == "http" || url.scheme() == "https") && extra.is_some()
 }
 
 impl fmt::Debug for Proxy {
@@ -548,28 +550,8 @@ impl Matcher {
         self.maybe_has_http_auth
     }
 
-    pub(crate) fn http_non_tunnel_basic_auth(&self, dst: &Uri) -> Option<HeaderValue> {
-        if let Some(proxy) = self.intercept(dst) {
-            if proxy.uri().scheme_str() == Some("http") {
-                return proxy.basic_auth().cloned();
-            }
-        }
-
-        None
-    }
-
     pub(crate) fn maybe_has_http_custom_headers(&self) -> bool {
         self.maybe_has_http_custom_headers
-    }
-
-    pub(crate) fn http_non_tunnel_custom_headers(&self, dst: &Uri) -> Option<HeaderMap> {
-        if let Some(proxy) = self.intercept(dst) {
-            if proxy.uri().scheme_str() == Some("http") {
-                return proxy.custom_headers().cloned();
-            }
-        }
-
-        None
     }
 }
 
@@ -583,6 +565,24 @@ impl fmt::Debug for Matcher {
 }
 
 impl Intercepted {
+    pub(crate) fn http_non_tunnel_basic_auth(&self) -> Option<HeaderValue> {
+        let scheme = self.uri().scheme();
+        if scheme == Some(&Scheme::HTTP) || scheme == Some(&Scheme::HTTPS) {
+            return self.basic_auth().cloned();
+        }
+
+        None
+    }
+
+    pub(crate) fn http_non_tunnel_custom_headers(&self) -> Option<HeaderMap> {
+        let scheme = self.uri().scheme();
+        if scheme == Some(&Scheme::HTTP) || scheme == Some(&Scheme::HTTPS) {
+            return self.custom_headers().cloned();
+        }
+
+        None
+    }
+
     pub(crate) fn uri(&self) -> &http::Uri {
         self.inner.uri()
     }
@@ -911,12 +911,18 @@ mod tests {
         let m = Proxy::all("https://letme:in@yo.local")
             .unwrap()
             .into_matcher();
-        assert!(!m.maybe_has_http_auth(), "https always tunnels");
+        assert!(m.maybe_has_http_auth(), "https forwards");
 
         let m = Proxy::all("http://letme:in@yo.local")
             .unwrap()
             .into_matcher();
         assert!(m.maybe_has_http_auth(), "http forwards");
+
+        let m = Proxy::all("http://:in@yo.local").unwrap().into_matcher();
+        assert!(m.maybe_has_http_auth(), "http forwards with empty username");
+
+        let m = Proxy::all("http://letme:@yo.local").unwrap().into_matcher();
+        assert!(m.maybe_has_http_auth(), "http forwards with empty password");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 #![cfg(not(target_arch = "wasm32"))]
-#![cfg(not(feature = "rustls-tls-manual-roots-no-provider"))]
+#![cfg(not(feature = "rustls-no-provider"))]
 mod support;
 use support::server;
 
@@ -68,6 +68,48 @@ async fn http_proxy_basic_auth() {
         .unwrap();
 
     assert_eq!(res.url().as_str(), url);
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn http_proxy_does_not_use_later_proxy_basic_auth() {
+    http_proxy_does_not_use_later_proxy_headers(false).await;
+}
+
+#[tokio::test]
+async fn http_proxy_does_not_use_later_proxy_custom_headers() {
+    http_proxy_does_not_use_later_proxy_headers(true).await;
+}
+
+async fn http_proxy_does_not_use_later_proxy_headers(custom: bool) {
+    let url = "http://hyper.rs.local/prox";
+    let server = server::http(move |req| {
+        assert!(!req.headers().contains_key("proxy-authorization"));
+        assert!(!req.headers().contains_key("x-proxy-secret"));
+
+        async { http::Response::default() }
+    });
+
+    let later_proxy = reqwest::Proxy::http("http://unused.proxy.local").unwrap();
+    let later_proxy = if custom {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("proxy-authorization", "secret".parse().unwrap());
+        headers.insert("x-proxy-secret", "secret".parse().unwrap());
+        later_proxy.headers(headers)
+    } else {
+        later_proxy.basic_auth("Aladdin", "open sesame")
+    };
+
+    let res = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::http(format!("http://{}", server.addr())).unwrap())
+        .proxy(later_proxy)
+        .build()
+        .unwrap()
+        .get(url)
+        .send()
+        .await
+        .unwrap();
+
     assert_eq!(res.status(), reqwest::StatusCode::OK);
 }
 

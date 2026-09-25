@@ -46,10 +46,6 @@ pin_project! {
     }
 }
 
-/// Converts any `impl Body` into a `impl Stream` of just its DATA frames.
-#[cfg(any(feature = "stream", feature = "multipart",))]
-pub(crate) struct DataStream<B>(pub(crate) B);
-
 impl Body {
     /// Returns a reference to the internal data of the `Body`.
     ///
@@ -159,11 +155,6 @@ impl Body {
             Inner::Reusable(ref chunk) => Some(Body::reusable(chunk.clone())),
             Inner::Streaming { .. } => None,
         }
-    }
-
-    #[cfg(feature = "multipart")]
-    pub(crate) fn into_stream(self) -> DataStream<Body> {
-        DataStream(self)
     }
 
     #[cfg(feature = "multipart")]
@@ -348,11 +339,11 @@ where
     ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
         let mut this = self.project();
 
-        // Start the `Sleep` if not active.
+        let deadline = tokio::time::Instant::now() + *this.timeout;
         let sleep_pinned = if let Some(some) = this.sleep.as_mut().as_pin_mut() {
             some
         } else {
-            this.sleep.set(Some(tokio::time::sleep(*this.timeout)));
+            this.sleep.set(Some(tokio::time::sleep_until(deadline)));
             this.sleep.as_mut().as_pin_mut().unwrap()
         };
 
@@ -363,8 +354,10 @@ where
 
         let item = ready!(this.inner.poll_frame(cx))
             .map(|opt_chunk| opt_chunk.map_err(crate::error::body));
-        // a ready frame means timeout is reset
-        this.sleep.set(None);
+        // a ready frame means timeout is reset for the next chunk
+        if let Some(some) = this.sleep.as_mut().as_pin_mut() {
+            some.reset(tokio::time::Instant::now() + *this.timeout);
+        }
         Poll::Ready(item)
     }
 
@@ -419,33 +412,6 @@ where
     E: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
     err.into()
-}
-
-// ===== impl DataStream =====
-
-#[cfg(any(feature = "stream", feature = "multipart",))]
-impl<B> futures_core::Stream for DataStream<B>
-where
-    B: HttpBody<Data = Bytes> + Unpin,
-{
-    type Item = Result<Bytes, B::Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        loop {
-            return match ready!(Pin::new(&mut self.0).poll_frame(cx)) {
-                Some(Ok(frame)) => {
-                    // skip non-data frames
-                    if let Ok(buf) = frame.into_data() {
-                        Poll::Ready(Some(Ok(buf)))
-                    } else {
-                        continue;
-                    }
-                }
-                Some(Err(err)) => Poll::Ready(Some(Err(err))),
-                None => Poll::Ready(None),
-            };
-        }
-    }
 }
 
 // ===== impl IntoBytesBody =====

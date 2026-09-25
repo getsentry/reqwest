@@ -11,6 +11,9 @@ use tokio::net::TcpStream;
 use tokio::runtime;
 use tokio::sync::oneshot;
 
+#[cfg(feature = "http3")]
+static CRYPTO_PROVIDER_INSTALLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 pub struct Server {
     addr: net::SocketAddr,
     panic_rx: std_mpsc::Receiver<()>,
@@ -178,6 +181,44 @@ impl Http3 {
             + 'static,
         Fut: Future<Output = http::Response<reqwest::Body>> + Send + 'static,
     {
+        self.build_server(func, None)
+    }
+
+    pub fn build_with_stop_sending_before_response<F1, Fut>(
+        self,
+        func: F1,
+        code: h3::error::Code,
+    ) -> Server
+    where
+        F1: Fn(
+                http::Request<
+                    http_body_util::combinators::BoxBody<bytes::Bytes, h3::error::StreamError>,
+                >,
+            ) -> Fut
+            + Clone
+            + Send
+            + 'static,
+        Fut: Future<Output = http::Response<reqwest::Body>> + Send + 'static,
+    {
+        self.build_server(func, Some(code))
+    }
+
+    fn build_server<F1, Fut>(
+        self,
+        func: F1,
+        stop_sending_before_response: Option<h3::error::Code>,
+    ) -> Server
+    where
+        F1: Fn(
+                http::Request<
+                    http_body_util::combinators::BoxBody<bytes::Bytes, h3::error::StreamError>,
+                >,
+            ) -> Fut
+            + Clone
+            + Send
+            + 'static,
+        Fut: Future<Output = http::Response<reqwest::Body>> + Send + 'static,
+    {
         use bytes::Buf;
         use http_body_util::BodyExt;
         use quinn::crypto::rustls::QuicServerConfig;
@@ -195,6 +236,8 @@ impl Http3 {
 
             let cert = std::fs::read("tests/support/server.cert").unwrap().into();
             let key = std::fs::read("tests/support/server.key").unwrap().try_into().unwrap();
+
+            CRYPTO_PROVIDER_INSTALLED.get_or_init(install_default_crypto_provider);
 
             let mut tls_config = rustls::ServerConfig::builder()
                 .with_no_client_auth()
@@ -237,7 +280,10 @@ impl Http3 {
                                             let func = func.clone();
                                             tokio::spawn(async move {
                                                 if let Ok((req, stream)) = resolver.resolve_request().await {
-                                                    let (mut tx, rx) = stream.split();
+                                                    let (mut tx, mut rx) = stream.split();
+                                                    if let Some(code) = stop_sending_before_response {
+                                                        rx.stop_sending(code);
+                                                    }
                                                     let body = futures_util::stream::unfold(rx, |mut rx| async move {
                                                         match rx.recv_data().await {
                                                             Ok(Some(mut buf)) => {
@@ -283,6 +329,24 @@ impl Http3 {
         .join()
         .unwrap()
     }
+}
+
+#[cfg(feature = "http3")]
+fn install_default_crypto_provider() -> bool {
+    #[cfg(not(any(feature = "__rustls-ring", feature = "__rustls-aws-lc-rs")))]
+    panic!("No provider set");
+
+    #[cfg(all(feature = "__rustls-ring", not(feature = "__rustls-aws-lc-rs")))]
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install the default Ring TLS provider");
+
+    #[cfg(feature = "__rustls-aws-lc-rs")]
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("failed to install the default TLS provider");
+
+    true
 }
 
 pub fn low_level_with_response<F>(do_response: F) -> Server
