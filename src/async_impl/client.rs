@@ -167,6 +167,8 @@ struct Config {
     certs_verification: bool,
     #[cfg(feature = "__tls")]
     tls_sni: bool,
+    #[cfg(feature = "__rustls")]
+    tls_sslkeylogfile: bool,
     connect_timeout: Option<Duration>,
     connection_verbose: bool,
     pool_idle_timeout: Option<Duration>,
@@ -206,6 +208,7 @@ struct Config {
     http1_allow_obsolete_multiline_headers_in_responses: bool,
     http1_ignore_invalid_headers_in_responses: bool,
     http1_allow_spaces_after_header_name_in_responses: bool,
+    http1_max_headers: Option<usize>,
     #[cfg(feature = "http2")]
     http2_initial_stream_window_size: Option<u32>,
     #[cfg(feature = "http2")]
@@ -294,6 +297,8 @@ impl ClientBuilder {
                 certs_verification: true,
                 #[cfg(feature = "__tls")]
                 tls_sni: true,
+                #[cfg(feature = "__rustls")]
+                tls_sslkeylogfile: false,
                 connect_timeout: None,
                 connection_verbose: false,
                 pool_idle_timeout: Some(Duration::from_secs(90)),
@@ -333,6 +338,7 @@ impl ClientBuilder {
                 http1_allow_obsolete_multiline_headers_in_responses: false,
                 http1_ignore_invalid_headers_in_responses: false,
                 http1_allow_spaces_after_header_name_in_responses: false,
+                http1_max_headers: None,
                 #[cfg(feature = "http2")]
                 http2_initial_stream_window_size: None,
                 #[cfg(feature = "http2")]
@@ -572,9 +578,11 @@ impl ClientBuilder {
 
                     if let Some(min_tls_version) = config.min_tls_version {
                         let protocol = min_tls_version.to_native_tls().ok_or_else(|| {
-                            // TLS v1.3. This would be entirely reasonable,
-                            // native-tls just doesn't support it.
-                            // https://github.com/sfackler/rust-native-tls/issues/140
+                            // native-tls added support for TLS v1.3 in 0.2.16 🎉
+                            // `to_native_tls` could arguably return the value directly
+                            // instead of making us check for an impossible None here,
+                            // but given that 1.4 does not exist yet, that might get
+                            // messy in the future.
                             crate::error::builder("invalid minimum TLS version for backend")
                         })?;
                         tls.min_protocol_version(Some(protocol));
@@ -582,7 +590,6 @@ impl ClientBuilder {
 
                     if let Some(max_tls_version) = config.max_tls_version {
                         let protocol = max_tls_version.to_native_tls().ok_or_else(|| {
-                            // TLS v1.3.
                             // We could arguably do max_protocol_version(None), given
                             // that 1.4 does not exist yet, but that'd get messy in the
                             // future.
@@ -753,7 +760,7 @@ impl ClientBuilder {
                         }
 
                         let verifier = if config.root_certs.is_empty() {
-                            rustls_platform_verifier::Verifier::new(provider.clone())
+                            rustls_platform_verifier::Verifier::new(provider)
                                 .map_err(crate::error::builder)?
                         } else {
                             #[cfg(any(
@@ -763,7 +770,7 @@ impl ClientBuilder {
                             {
                                 rustls_platform_verifier::Verifier::new_with_extra_roots(
                                     crate::tls::rustls_der(config.root_certs)?,
-                                    provider.clone(),
+                                    provider,
                                 )
                                 .map_err(crate::error::builder)?
                             }
@@ -813,6 +820,10 @@ impl ClientBuilder {
                     };
 
                     tls.enable_sni = config.tls_sni;
+
+                    if config.tls_sslkeylogfile {
+                        tls.key_log = Arc::new(rustls::KeyLogFile::new());
+                    }
 
                     // ALPN protocol
                     match config.http_version_pref {
@@ -991,6 +1002,10 @@ impl ClientBuilder {
 
         if config.http1_allow_spaces_after_header_name_in_responses {
             builder.http1_allow_spaces_after_header_name_in_responses(true);
+        }
+
+        if let Some(http1_max_headers) = config.http1_max_headers {
+            builder.http1_max_headers(http1_max_headers);
         }
 
         let proxies_maybe_http_auth = proxies.iter().any(|p| p.maybe_has_http_auth());
@@ -1542,6 +1557,17 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the maximum number of headers accepted in an HTTP/1 response.
+    ///
+    /// When a response contains more headers than this value, it is rejected
+    /// with a parse error and the request fails.
+    ///
+    /// Default is 100.
+    pub fn http1_max_headers(mut self, max: usize) -> ClientBuilder {
+        self.config.http1_max_headers = Some(max);
+        self
+    }
+
     /// Only use HTTP/1.
     pub fn http1_only(mut self) -> ClientBuilder {
         self.config.http_version_pref = HttpVersionPref::Http1;
@@ -2037,16 +2063,31 @@ impl ClientBuilder {
         self
     }
 
+    /// Controls if the SSLKEYLOGFILE environment variable is respected.
+    ///
+    /// When enabled, if the environment variable `SSLKEYLOGFILE` is present at runtime,
+    /// TLS keys will be logged to the file at the path described in the variable.
+    /// This can be used by end-users to allow debugging TLS connections.
+    ///
+    /// Defaults to `false`.
+    ///
+    /// # Optional
+    ///
+    /// This requires the `rustls(-...)` Cargo feature enabled.
+    #[cfg(feature = "__rustls")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "rustls")))]
+    pub fn tls_sslkeylogfile(mut self, on: bool) -> ClientBuilder {
+        self.config.tls_sslkeylogfile = on;
+        self
+    }
+
     /// Set the minimum required TLS version for connections.
     ///
     /// By default, the TLS backend's own default is used.
     ///
-    /// # Errors
-    ///
-    /// A value of `tls::Version::TLS_1_3` will cause an error with the
-    /// `native-tls` backend. This does not mean the version
-    /// isn't supported, just that it can't be set as a minimum due to
-    /// technical limitations.
+    /// On Apple platforms, a value of `tls::Version::TLS_1_3` may cause requests
+    /// to fail (with error -9830) with the `native-tls` backend due to lack of
+    /// TLS 1.3 support.
     ///
     /// # Optional
     ///
@@ -2072,12 +2113,11 @@ impl ClientBuilder {
     ///
     /// By default, there's no maximum.
     ///
-    /// # Errors
+    /// On Apple platforms, a value of `tls::Version::TLS_1_3` may cause requests
+    /// to fall back to TLS 1.2 if allowed by `tls_version_min`, or fail (with error
+    /// -9830) with the `native-tls` backend due to lack of TLS 1.3 support.
     ///
-    /// A value of `tls::Version::TLS_1_3` will cause an error with the
-    /// `native-tls` backend. This does not mean the version
-    /// isn't supported, just that it can't be set as a maximum due to
-    /// technical limitations.
+    /// # Errors
     ///
     /// Cannot set a maximum outside the protocol versions supported by
     /// `rustls` with the `rustls` backend.
@@ -2698,8 +2738,11 @@ impl Client {
         }
 
         for proxy in self.inner.proxies.iter() {
-            if let Some(header) = proxy.http_non_tunnel_basic_auth(dst) {
-                headers.insert(PROXY_AUTHORIZATION, header);
+            if let Some(proxy) = proxy.intercept(dst) {
+                if let Some(header) = proxy.http_non_tunnel_basic_auth() {
+                    headers.insert(PROXY_AUTHORIZATION, header);
+                }
+                // Use only the first matching proxy, as the connector does.
                 break;
             }
         }
@@ -2715,10 +2758,13 @@ impl Client {
         }
 
         for proxy in self.inner.proxies.iter() {
-            if let Some(iter) = proxy.http_non_tunnel_custom_headers(dst) {
-                iter.iter().for_each(|(key, value)| {
-                    headers.insert(key, value.clone());
-                });
+            if let Some(proxy) = proxy.intercept(dst) {
+                if let Some(iter) = proxy.http_non_tunnel_custom_headers() {
+                    iter.iter().for_each(|(key, value)| {
+                        headers.insert(key, value.clone());
+                    });
+                }
+                // Use only the first matching proxy, as the connector does.
                 break;
             }
         }
@@ -2878,6 +2924,11 @@ impl Config {
             f.field("tls_sni", &self.tls_sni);
 
             f.field("tls_info", &self.tls_info);
+        }
+
+        #[cfg(feature = "__rustls")]
+        {
+            f.field("tls_sslkeylogfile", &self.tls_sslkeylogfile);
         }
 
         #[cfg(all(feature = "default-tls", feature = "__rustls"))]
@@ -3148,7 +3199,7 @@ fn validate_url(ip_filter: fn(IpAddr) -> bool, url: &Url) -> Result<(), crate::E
     };
 
     if !is_valid_ip {
-        let e = hickory_resolver::ResolveError::from("destination is restricted");
+        let e = crate::dns::hickory::ResolveError::Restricted;
         return Err(crate::Error::new(crate::error::Kind::Request, Some(e)));
     }
     Ok(())
