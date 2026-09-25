@@ -207,6 +207,35 @@ async fn body_pipe_response() {
     assert_eq!(res2.status(), reqwest::StatusCode::OK);
 }
 
+struct FailingResolver;
+
+impl reqwest::dns::Resolve for FailingResolver {
+    fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async { Err("simulated resolver failure".into()) })
+    }
+}
+
+#[tokio::test]
+async fn dns_resolution_failure_is_dns_error() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .dns_resolver(std::sync::Arc::new(FailingResolver))
+        .build()
+        .expect("client builder");
+
+    let err = client
+        .get("http://does.not.resolve.invalid/")
+        .send()
+        .await
+        .expect_err("request should fail during resolution");
+
+    assert!(err.is_dns(), "expected a DNS error, got: {err:?}");
+    // DNS errors are a refinement of connect errors.
+    assert!(err.is_connect(), "expected is_connect() to also be true");
+}
+
 #[tokio::test]
 async fn overridden_dns_resolution_with_gai() {
     let _ = env_logger::builder().is_test(true).try_init();
@@ -492,6 +521,51 @@ async fn test_tls_info() {
     assert!(tls_info.is_none());
 }
 
+#[cfg(all(feature = "__rustls", not(feature = "rustls-no-provider")))]
+#[tokio::test]
+async fn test_tls_info_version_rustls() {
+    let resp = reqwest::Client::builder()
+        .tls_backend_rustls()
+        .tls_info(true)
+        .build()
+        .expect("client builder")
+        .get("https://google.com")
+        .send()
+        .await
+        .expect("response");
+    let tls_info = resp
+        .extensions()
+        .get::<reqwest::tls::TlsInfo>()
+        .expect("tls info");
+    let version = tls_info.version().expect("negotiated version");
+    assert!(
+        version >= reqwest::tls::Version::TLS_1_2,
+        "negotiated {version:?}"
+    );
+}
+
+// native-tls cannot report the negotiated version, so it stays `None` even
+// though the rest of the `TlsInfo` is populated.
+#[cfg(feature = "__native-tls")]
+#[tokio::test]
+async fn test_tls_info_version_native_tls() {
+    let resp = reqwest::Client::builder()
+        .tls_backend_native()
+        .tls_info(true)
+        .build()
+        .expect("client builder")
+        .get("https://google.com")
+        .send()
+        .await
+        .expect("response");
+    let tls_info = resp
+        .extensions()
+        .get::<reqwest::tls::TlsInfo>()
+        .expect("tls info");
+    assert!(tls_info.peer_certificate().is_some());
+    assert!(tls_info.version().is_none());
+}
+
 #[tokio::test]
 async fn close_connection_after_idle_timeout() {
     let mut server = server::http(move |_| async move { http::Response::default() });
@@ -546,4 +620,39 @@ async fn error_has_url() {
     let u = "http://does.not.exist.local/ever";
     let err = reqwest::get(u).await.unwrap_err();
     assert_eq!(err.url().map(AsRef::as_ref), Some(u), "{err:?}");
+}
+
+#[tokio::test]
+async fn http1_max_headers() {
+    // The server responds with 150 headers, well over hyper's default limit of 100.
+    let server = server::http(move |_req| async move {
+        let mut builder = http::Response::builder();
+        for i in 0..150 {
+            builder = builder.header(format!("x-custom-{i}"), "value");
+        }
+        builder.body("Hello".into()).unwrap()
+    });
+
+    let url = format!("http://{}/", server.addr());
+
+    // The default client uses hyper's 100-header limit and rejects the response.
+    reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .expect_err("the default 100-header limit should reject a 150-header response");
+
+    // Raising the limit lets the same response through.
+    let res = reqwest::Client::builder()
+        .http1_max_headers(300)
+        .build()
+        .unwrap()
+        .get(&url)
+        .send()
+        .await
+        .expect("a raised http1_max_headers should accept the response");
+
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
+    assert_eq!(res.headers()["x-custom-0"], "value");
+    assert_eq!(res.headers()["x-custom-149"], "value");
 }
